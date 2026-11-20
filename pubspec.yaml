@@ -1,0 +1,28 @@
+name: manhua_reader
+description: "漫阅 - 支持 PDF 与 MOBI 的手机 / 平板漫画阅读器"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  file_picker: ^13.1.0
+  path: ^1.9.1
+  path_provider: ^2.1.6
+  pdfrx: ^2.6.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  image: ^4.10.1
+
+flutter:
+  uses-material-design: true

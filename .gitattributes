@@ -1,0 +1,9 @@
+# Keep PDFs and image/font assets byte-exact on all platforms.
+*.pdf -text
+*.mobi -text
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.ttf binary
+*.otf binary
