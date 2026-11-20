@@ -27,6 +27,21 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["appLabel"] = "漫阅"
+    }
+
+    flavorDimensions += "device"
+    productFlavors {
+        create("phone") {
+            dimension = "device"
+            applicationIdSuffix = ".phone"
+            manifestPlaceholders["appLabel"] = "漫阅"
+        }
+        create("tablet") {
+            dimension = "device"
+            applicationIdSuffix = ".tablet"
+            manifestPlaceholders["appLabel"] = "漫阅 HD"
+        }
     }
 
     buildTypes {

@@ -62,7 +62,7 @@
 
 - Flutter **3.47+**（Dart 3.13+）
 - Windows 构建需开启 **开发者模式**（Flutter 插件符号链接所需）
-- Android 构建需要安装 **Android SDK**（本仓库不包含 SDK）
+- Android 构建需要 **Android SDK 36** 与 **JDK 17**；设置 `ANDROID_HOME` / `JAVA_HOME` 后运行 `flutter doctor` 确认
 - iOS 构建需要 macOS + Xcode
 
 ### 运行
@@ -70,32 +70,40 @@
 ```bash
 flutter pub get
 
-# Windows 桌面（本机已验证）
+# Windows 桌面
 flutter run -d windows
 
-# Android（需先通过 flutter doctor 配置 SDK）
+# Android 手机 / 平板（按设备宽度自适应）
 flutter run -d android
 
 # iOS（在 macOS 上）
 flutter run -d ios
 ```
 
-### 打包
+### 三端打包
 
 ```bash
-# Android（需配置签名）
-flutter build apk --release
+# PC 桌面端（Windows x64）
+flutter build windows --release --no-pub
 
-# Windows
-flutter build windows --release
+# 安卓手机端
+flutter build apk --release --flavor phone --no-pub
+
+# 安卓平板端
+flutter build apk --release --flavor tablet --no-pub
 ```
 
-- Windows 产物：`build/windows/x64/runner/Release/`
-- Android 产物：`build/app/outputs/flutter-apk/app-release.apk`
+产物：
 
-Debug / Release 两个版本均已在本地实机验证 PDF 与 MOBI 阅读；构建产物不提交到仓库。
+| 端 | 产物 | 包名 / 说明 |
+| --- | --- | --- |
+| PC Windows | `build/windows/x64/runner/Release/` | Windows 10/11 x64 便携版 |
+| Android 手机 | `build/app/outputs/flutter-apk/app-phone-release.apk` | `com.manhua.manhua_reader.phone`，桌面名「漫阅」 |
+| Android 平板 | `build/app/outputs/flutter-apk/app-tablet-release.apk` | `com.manhua.manhua_reader.tablet`，桌面名「漫阅 HD」 |
 
-本机没有 Android SDK / JDK，因此**未生成 APK**；Android 工程与依赖已经就绪，在装有 SDK 的机器上执行上面的命令即可。
+- 手机 / 平板使用同一套响应式界面：手机 2 列，平板按宽度 4–6 列；两个 APK 可同时安装。
+- 本地发布包位于 `dist/`（已 gitignore），包含 Windows ZIP、两个 APK、三端说明与 SHA-256 校验。
+- 当前 Android Release 使用调试签名，适合侧载测试；上架应用商店前需配置正式签名。
 
 > Windows 构建说明：正常情况下开启系统「开发者模式」即可。若无法开启，可手动为 `.flutter-plugins-dependencies` 里的 Windows 插件在 `windows/flutter/ephemeral/.plugin_symlinks/` 下创建目录 junction，然后使用 `flutter build windows --no-pub`（本项目开发环境即采用这种方式）。
 
@@ -292,14 +300,14 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 - P2 的「增量索引」目前是进程内索引，`library.json` 仍是唯一持久化来源；SQLite / Isar 迁移按方案保留，适合书架超过约 1000 本后再引入。
 - 文件夹导入保留**所选目录这一层**，内部子目录会递归合并到同一个书架文件夹，不建立嵌套目录树；删除文件夹只把书籍移回根目录。文件夹名称大小写不敏感去重。
 - 完整 ZIP 备份会先在内存中读取压缩包再交给系统保存；书架包含多个 100MB 以上文件时建议先导出 JSON 或分批备份。
-- Android SAF 文件夹导入通过原生 `MethodChannel` 实现，但当前环境没有 Android SDK / 设备，未能编译与真机验证；Windows Release 构建通过，桌面文件夹选择与拖拽建议在桌面手动验收。
+- Android SAF 文件夹导入通过原生 `MethodChannel` 实现，已随手机 / 平板 APK 编译通过；当前未连接 Android 真机 / 模拟器，运行时文件夹授权流程仍需设备验收。Windows Release 已构建，桌面文件夹选择与拖拽建议在桌面手动验收。
 - 系列名推导是启发式规则，可能误判特殊标题；可在「系列与标签」中手动修正。
 - 阅读统计按翻页页数而非去重页面统计；使用页码滑杆跳页会按跨越页数计入。
 - Windows **Release** 增量构建在新增 Material 图标后，Flutter 的图标字体子集偶尔不会刷新，表现为按钮空白或图标缺失。遇到时删除 `build/windows/x64/runner/Release` 后重新执行 `flutter build windows --release --no-pub` 即可；Debug 构建不受影响。
 - 放大为位图缩放，极限放大的清晰度受当前渲染分辨率限制。
 - 暂无注释、夜间滤镜、自动翻页等功能。
 - Web 平台未适配（本地文件存储依赖 `dart:io`），当前面向 Android / iOS / Windows。
-- 当前环境无 Android SDK / JDK，因此未产出 APK。
+- 手机 / 平板 APK 已构建并通过 `apksigner` 校验；当前环境没有连接 Android 设备，因此阅读、SAF 授权与外接存储流程仍需真机验收。
 
 ## 应用图标
 
