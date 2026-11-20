@@ -1,9 +1,9 @@
 # 漫阅书架功能开发方案
 
-> 版本：v1.1 · 2026-11-20  
+> 版本：v1.2 · 2026-11-21  
 > 适用项目：`manhua_reader`（Flutter / Android / iOS / Windows）  
-> 状态：P0 基线已在现有代码中落地；P1 已于 2026-11-20 完成；P2 作为后续迭代计划。  
-> 关联代码：`lib/screens/library_screen.dart`、`lib/services/library_repository.dart`、`lib/services/app_paths.dart`、`lib/services/cover_generator.dart`、`lib/models/comic_book.dart`、`lib/models/library_settings.dart`、`lib/models/library_storage_report.dart`、`lib/widgets/library_storage_sheet.dart`
+> 状态：P0 基线已在现有代码中落地；P1 已于 2026-11-20 完成；P2 功能已完成（SQLite 迁移按规模条件保留）。  
+> 关联代码：`lib/screens/library_screen.dart`、`lib/screens/series_screen.dart`、`lib/services/library_repository.dart`、`lib/services/library_index.dart`、`lib/services/folder_import.dart`、`lib/services/saf_folder_service.dart`、`lib/models/comic_book.dart`、`lib/models/reading_stats.dart`、`lib/models/library_settings.dart`、`lib/widgets/reading_stats_sheet.dart`、`lib/widgets/backup_sheet.dart`、`lib/widgets/book_organization_dialog.dart`
 
 ---
 
@@ -105,20 +105,28 @@
 
 实现备注：
 
-- 搜索、排序、筛选与视图偏好：`LibrarySettings` / `library.json`（`version: 2`）持久化视图与排序；搜索与筛选条件不跨会话保存，避免下次启动出现“空书架”的误解。
+- 搜索、排序、筛选与视图偏好：`LibrarySettings` / `library.json`（P1 为 `version: 2`，P2 升至 `version: 3`）持久化视图与排序；搜索与筛选条件不跨会话保存，避免下次启动出现“空书架”的误解。
 - 多选栏位于底部，提供退出、全选/取消全选、标记已读与删除；删除走二次确认，标记已读会写入 `lastPage = pageCount - 1` 与 `lastReadAt`。
 - 重定位使用 `${id}_r<timestamp>.<ext>` 新副本，成功后才删除旧文件；封面重建使用 `${id}_c<timestamp>.png`，避免图片缓存命中旧图。
 - 存储管理按实际目录扫描 `books/`、`covers/`、`cache/`，区分书架引用、缓存与无引用文件；清理不会删除书架中的有效文件。
 - P1 新增 19 个测试（仓储 / 文件修复 / 书架 UI / 窄屏选择栏），测试总数 41，`flutter analyze` 无告警。
 
-### 3.3 P2：中长期规划
+### 3.3 P2：已完成（2026-11-21）
 
-- 分类/合集/标签、收藏与置顶。
-- 从 Android SAF 文件夹/桌面文件夹批量导入，桌面拖拽导入。
-- 阅读统计（本周阅读页数、连续阅读天数）。
-- 书架导出/导入备份（JSON + 可选文件清单）。
-- 自定义封面、系列卷合并展示。
-- 书架增量索引（书多时引入 SQLite/Isar；当前 JSON 适合数百本以内）。
+- 系列 / 合集 / 标签：每本书可编辑系列名与最多 20 个标签；导入时从 `VOL.001`、`第12卷`、`v03` 等标题推导系列提示；`SeriesScreen` 将同系列卷合并展示。
+- 收藏与置顶：`favorite` / `pinned` 随书持久化；置顶优先排序，收藏可筛选。
+- 文件夹 / 拖拽导入：桌面端递归扫描文件夹、支持拖入文件或文件夹；Android 通过 `manhua/saf` 原生通道选择 SAF 文件夹、递归列出文档并复制导入。
+- 阅读统计：按本地日期记录前进页数，提供今日 / 本周 / 累计、当前连续、最长连续、最近 7 天柱状图；批量标记已读不计入翻页统计。
+- 备份与恢复：JSON 清单（不含漫画文件）与完整 `.mrbackup` ZIP（含文件/封面）；恢复合并书架、跳过重复、缺失文件标记可重定位、统计按日最大值合并。
+- 自定义封面与系列合并展示：`setCustomCover()` 从本地图片生成 520px PNG；`customCover` 随书保存；重新生成封面恢复自动封面。
+- 增量索引：`LibraryIndex` 在启动时构建、在导入/删除/重命名/组织编辑时增量更新，搜索覆盖书名 / 原名 / 系列 / 标签。SQLite/Isar 迁移仍按方案保留为「书架超过约 1000 本」时再实施。
+- 数据 schema 升至 `version: 3`；v2 数据加载时自动补齐系列提示与默认组织字段。
+
+实现备注：
+
+- P2 新增 20 个测试（统计 / 系列推导 / 索引 / 文件夹扫描 / 仓储 / UI / 拖拽覆盖层），测试总数 61，`flutter analyze` 无告警。
+- Android SAF 原生代码因当前环境无 Android SDK / 设备，未编译与真机验证；桌面 Windows Release 已构建并做面板/系列/统计/备份截图验收。
+- 完整 ZIP 备份在内存中读取后交给系统保存；超大书架建议使用 JSON 或分批备份。
 
 ---
 
@@ -240,15 +248,24 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 
 ### 5.3 数据模型
 
-`library.json` 结构（建议随 P1 升级到 `version: 2`）：
+`library.json` 结构（P2 为 `version: 3`）：
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "settings": {
     "mode": "horizontal",
     "rightToLeft": false,
     "doublePage": false
+  },
+  "library": {
+    "view": "grid",
+    "sort": "recentRead"
+  },
+  "stats": {
+    "dailyPages": {
+      "2026-11-20": 42
+    }
   },
   "books": [
     {
@@ -263,6 +280,11 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
       "lastPage": 3,
       "lastReadAt": "2026-11-20T22:49:00.000",
       "coverPath": "C:/Users/.../ManhuaReader/covers/m3k2x9abc.png",
+      "favorite": true,
+      "pinned": false,
+      "series": "VOL",
+      "tags": ["单行本", "收藏"],
+      "customCover": false,
       "bookmarks": [
         {
           "page": 1,
@@ -283,7 +305,11 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 - `pageCount`：导入时解析；打开阅读器时若实际页数不同则更新并清理越界书签。
 - `lastPage`：0-based；`progress = (lastPage + 1) / pageCount`。
 - `bookmarks`：按页排序；名称/备注可空；随 JSON 保存。
-- `version`：用于后续迁移（如增加分类、标签、封面版本、密码标记）。
+- `favorite` / `pinned`：收藏与置顶；`pinned` 参与书架排序。
+- `series` / `tags`：系列名与标签；v2 → v3 迁移时从标题推导系列提示。
+- `customCover`：封面是否来自用户图片；重新生成封面时复位。
+- `stats.dailyPages`：本地日期 `yyyy-MM-dd` → 前进翻页数；最多保留 730 天。
+- `version`：用于迁移；读取未知版本时保留原文件并回退默认值。
 
 ### 5.4 存储布局
 
@@ -391,12 +417,15 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 
 ## 7. 测试计划
 
-### 7.1 已有自动化覆盖（当前 41 个测试）
+### 7.1 已有自动化覆盖（当前 61 个测试）
 
 - Repository：加载/保存、进度恢复、损坏 JSON 回退、书签增删与名称备注持久化、路径迁移。
 - 导入：加密 PDF 带密码导入、封面生成、失败回滚；`.part` 原子导入失败清理。
 - P1 仓储：视图/排序持久化、重命名、批量删除、批量标记已读、存储统计与清理、文件重定位、封面重建。
 - P1 UI：搜索/空结果、格式/状态筛选、网格/列表切换、多选/全选/退出、标记已读、重命名、丢失文件提示、存储面板、窄屏选择栏。
+- P2 仓储：v2→v3 迁移、系列推导、组织/收藏/置顶、阅读统计、自定义封面、JSON/ZIP 备份恢复与重复跳过。
+- P2 UI：收藏/系列/标签筛选、系列合并页、组织信息编辑、统计面板、备份面板。
+- P2 基础：阅读统计周/连续天数/合并、`LibraryIndex` 增量索引、文件夹/拖拽路径扫描。
 - 阅读器相关：双页配对、密码对话框、书签编辑框等。
 - 真实样本（本地可选）：196 页 PDF、196 页 MOBI。
 
@@ -404,10 +433,10 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 
 | 类型 | 用例 |
 | --- | --- |
-| Unit | 多文件导入成功/部分失败（需可注入 picker）；流式导入重复检测；JSON 版本迁移 / 备份恢复 |
-| Integration | Android SAF 流导入、加密 PDF 密码输入、100MB 导入、应用重启恢复 |
+| Unit | 多文件导入成功/部分失败（需可注入 picker）；流式导入重复检测；未知 schema 版本处理 |
+| Integration | Android SAF 流导入、加密 PDF 密码输入、100MB 导入、应用重启恢复、桌面真实拖拽 |
 | Widget | 导入覆盖层的失败汇总与取消流程（文件选择器需测试替身） |
-| 性能 | 100 本书冷启动、滚动帧率、导入期间 UI 响应 |
+| 性能 | 100 本书冷启动、滚动帧率、导入期间 UI 响应、超大 ZIP 备份内存 |
 | 兼容 | Android 手机/平板、iOS、Windows 高 DPI/横竖屏 |
 
 ### 7.3 手工验收矩阵
@@ -442,9 +471,9 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 | M4 | 进度/书签联动、删除、路径迁移、异常提示 | 1.5 天 |
 | M5 | 测试补齐 + 真机验收 + 性能优化 | 2.0 天 |
 | M6（P1） | 搜索、排序、筛选、批量操作、存储统计 | 2.5 天 |
-| M7（P2） | 分类/合集/标签、拖拽/文件夹导入、备份 | 按需拆分 |
+| M7（P2） | 系列/标签/收藏置顶、统计、备份、文件夹/拖拽导入、增量索引 | 已完成（2026-11-21） |
 
-> 当前代码已完成 M1–M5 的主要 P0 基线；下一步建议从 P1 的「搜索 + 排序筛选 + 批量管理」开始。
+> 当前代码已完成 M1–M7；后续重点是 Android SAF / 桌面拖拽真机验收、SQLite/Isar 条件迁移与超大书架性能。
 
 ---
 
@@ -460,7 +489,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 | JSON 损坏/写中断 | 书架丢失 | 临时文件 + rename、去抖、备份/恢复（P1） |
 | 重复检测误判 | 两本同名同大小不同内容 | P1 改用内容哈希（如快速 xxHash/SHA-1 前若干 MB） |
 | 版权样本入公开仓库 | 法律/体积 | `.gitignore` 排除用户样本与截图；README 说明 |
-| 书架过大（>1000 本） | JSON/首屏变慢 | P2 迁移 SQLite/Isar + 分页/索引 |
+| 书架过大（>1000 本） | JSON/首屏变慢 | 已加入 `LibraryIndex` 增量索引；>1000 本时再迁移 SQLite/Isar + 分页 |
 
 ---
 
@@ -484,7 +513,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 1. **P1 Sprint 1**：搜索、排序、格式/进度筛选。
 2. **P1 Sprint 2**：批量选择/删除、重命名、导入队列与取消。
 3. **P1 Sprint 3**：存储统计、封面重建、丢失文件修复。
-4. **P2**：分类/合集/标签、收藏置顶、文件夹/拖拽导入、书架备份、列表视图、阅读统计。
+4. **P2（已完成 2026-11-21）**：系列/标签、收藏置顶、文件夹/拖拽导入、书架备份、阅读统计。
 
 ---
 

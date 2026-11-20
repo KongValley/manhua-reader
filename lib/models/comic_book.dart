@@ -42,8 +42,14 @@ class ComicBook {
     this.lastPage = 0,
     this.lastReadAt,
     this.coverPath,
+    this.favorite = false,
+    this.pinned = false,
+    this.series,
+    List<String>? tags,
+    this.customCover = false,
     List<Bookmark>? bookmarks,
-  }) : bookmarks = bookmarks ?? <Bookmark>[];
+  }) : bookmarks = bookmarks ?? <Bookmark>[],
+       tags = tags ?? <String>[];
 
   final String id;
 
@@ -70,6 +76,22 @@ class ComicBook {
 
   /// Absolute path of the generated cover thumbnail.
   String? coverPath;
+
+  /// Whether [coverPath] was chosen by the user instead of being generated
+  /// from the first page.
+  bool customCover;
+
+  /// Whether the user starred this book.
+  bool favorite;
+
+  /// Pinned books sort before regular books.
+  bool pinned;
+
+  /// Optional series / collection name used for grouping volumes.
+  String? series;
+
+  /// Free-form tags for filtering.
+  List<String> tags;
 
   /// User-created bookmarks, kept in ascending page order.
   final List<Bookmark> bookmarks;
@@ -103,6 +125,12 @@ class ComicBook {
     int? lastPage,
     DateTime? lastReadAt,
     String? coverPath,
+    bool? favorite,
+    bool? pinned,
+    String? series,
+    bool clearSeries = false,
+    List<String>? tags,
+    bool? customCover,
   }) {
     return ComicBook(
       id: id,
@@ -116,6 +144,11 @@ class ComicBook {
       lastPage: lastPage ?? this.lastPage,
       lastReadAt: lastReadAt ?? this.lastReadAt,
       coverPath: coverPath ?? this.coverPath,
+      favorite: favorite ?? this.favorite,
+      pinned: pinned ?? this.pinned,
+      series: clearSeries ? null : (series ?? this.series),
+      tags: tags ?? this.tags,
+      customCover: customCover ?? this.customCover,
       bookmarks: bookmarks,
     );
   }
@@ -132,6 +165,11 @@ class ComicBook {
     'lastPage': lastPage,
     'lastReadAt': lastReadAt?.toIso8601String(),
     'coverPath': coverPath,
+    'favorite': favorite,
+    'pinned': pinned,
+    'series': series,
+    'tags': tags,
+    'customCover': customCover,
     'bookmarks': bookmarks.map((bookmark) => bookmark.toJson()).toList(),
   };
 
@@ -144,6 +182,15 @@ class ComicBook {
           )
         : null;
     final pageCount = (json['pageCount'] as num?)?.toInt() ?? 0;
+    final tags = <String>[];
+    for (final item in (json['tags'] as List? ?? const [])) {
+      if (item is! String) continue;
+      final tag = item.trim();
+      if (tag.isEmpty || tags.contains(tag)) continue;
+      tags.add(tag);
+      if (tags.length >= 20) break;
+    }
+    final rawSeries = (json['series'] as String?)?.trim();
     final bookmarks =
         <Bookmark>[
             for (final item in (json['bookmarks'] as List? ?? const []))
@@ -171,6 +218,11 @@ class ComicBook {
       lastPage: (json['lastPage'] as num?)?.toInt() ?? 0,
       lastReadAt: DateTime.tryParse(json['lastReadAt'] as String? ?? ''),
       coverPath: json['coverPath'] as String?,
+      favorite: json['favorite'] == true,
+      pinned: json['pinned'] == true,
+      series: rawSeries == null || rawSeries.isEmpty ? null : rawSeries,
+      tags: tags,
+      customCover: json['customCover'] == true,
       bookmarks: bookmarks,
     );
   }

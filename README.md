@@ -17,6 +17,19 @@
   - 长按进入多选：全选、批量标记已读、批量删除。
   - 重命名只修改书架显示名；丢失文件可重新定位替换，保留进度与书签；封面可手动重建。
   - 存储管理显示总占用、每本书占用、缓存与无引用文件，并支持一键清理。
+- **系列与整理（P2）**
+  - 每本书可设置系列 / 合集名与最多 20 个标签；同名系列可在「系列合集」页合并展示，并按卷查看。
+  - 支持收藏与置顶：置顶书始终排在普通书之前；收藏书可一键筛选。
+  - 支持自定义封面（本地图片）与恢复自动生成封面。
+  - 搜索索引覆盖书名、原始文件名、系列与标签，并在重命名 / 编辑组织信息后增量更新。
+- **文件夹与拖拽导入（P2）**
+  - 桌面端可选择文件夹递归导入 PDF / MOBI，或把文件 / 文件夹拖进书架。
+  - Android 通过 Storage Access Framework 选择文件夹，递归列出并通过原生通道复制导入。
+- **阅读统计（P2）**：记录每日翻页页数，展示今日 / 本周 / 累计、连续阅读天数、最长连续记录和最近 7 天柱状图。
+- **备份与恢复（P2）**
+  - 导出 JSON：书架、进度、书签、系列、标签、收藏、置顶与统计；不含漫画文件。
+  - 导出完整 `.mrbackup`（ZIP）：额外包含漫画文件与封面，适合迁移或完整恢复。
+  - 恢复时合并到当前书架，自动跳过重复；JSON 恢复缺失文件时标记「文件丢失」，可逐本重新定位。
 - **可靠导入**：多文件顺序导入，显示当前 / 总数 / 成功 / 失败与百分比；支持取消剩余任务；先写 `.part` 临时文件再原子改名，失败自动回滚。
 - **阅读器**
   - 横向翻页（PageView）与纵向连续滚动两种模式，切换时保留当前页。
@@ -128,7 +141,7 @@ lib/
 ├─ main_demo.dart             # 演示/截图入口：导入 test/ 样本，支持 --open=pdf|mobi
 ├─ app.dart                   # MaterialApp 与鼠标拖动行为
 ├─ theme/                     # 深色暖色主题
-├─ models/                    # ComicBook、ReaderSettings、LibrarySettings、Bookmark、TocEntry
+├─ models/                    # ComicBook、ReaderSettings、LibrarySettings、ReadingStats、Bookmark、TocEntry
 ├─ formats/
 │  ├─ comic_source.dart       # 统一页面源接口（页面 / 缩略图 / 目录）
 │  ├─ pdf_comic_source.dart   # pdfrx 渲染 + PDF outline 解析
@@ -136,18 +149,27 @@ lib/
 │  ├─ comic_source_factory.dart
 │  └─ mobi/mobi_book.dart     # PalmDB / MOBI / EXTH / HTML 阅读顺序解析
 ├─ screens/
-│  ├─ library_screen.dart     # 书架、搜索筛选、多选、导入、维护、存储管理
+│  ├─ library_screen.dart     # 书架、搜索筛选、多选、导入、维护、备份、统计入口
+│  ├─ series_screen.dart      # 系列合集与卷列表
 │  └─ reader_screen.dart      # 横/纵向、双页、缩放、菜单、跳页
 ├─ services/
 │  ├─ app_paths.dart
-│  ├─ library_repository.dart # 导入 / 重定位 / 封面 / 删除 / 存储统计 / 持久化
+│  ├─ library_repository.dart # 导入 / 重定位 / 封面 / 删除 / 组织 / 统计 / 备份 / 持久化
+│  ├─ library_index.dart      # 标题 / 系列 / 标签增量索引
+│  ├─ folder_import.dart      # 文件夹 / 拖拽路径扫描
+│  ├─ saf_folder_service.dart # Android SAF 文件夹通道
 │  ├─ cover_generator.dart    # PDF / 图片封面缩略图
 │  └─ pdf_password_cache.dart # 会话级密码缓存（不落盘）
-├─ utils/pagination.dart      # 双页跨页配对
+├─ utils/
+│  ├─ pagination.dart         # 双页跨页配对
+│  └─ series.dart             # 从标题 / 文件名推导系列名
 └─ widgets/
    ├─ book_cover.dart
    ├─ bookmark_editor_dialog.dart   # 书签名称 / 备注编辑
+   ├─ book_organization_dialog.dart # 系列 / 标签编辑
    ├─ library_storage_sheet.dart    # 存储统计与清理
+   ├─ reading_stats_sheet.dart      # 阅读统计
+   ├─ backup_sheet.dart             # JSON / ZIP 备份与恢复
    ├─ pdf_password_dialog.dart      # 加密 PDF 解锁对话框
    └─ reader_navigation_sheet.dart  # 目录 / 书签 / 缩略图面板
 test/
@@ -157,10 +179,16 @@ test/
 ├─ pdf_password_dialog_test.dart # 密码对话框输入 / 取消
 ├─ bookmark_editor_dialog_test.dart # 书签名称 / 备注对话框
 ├─ pagination_test.dart       # 双页配对逻辑
+├─ reading_stats_test.dart    # 周统计 / 连续天数 / 合并 / 序列化
+├─ series_test.dart           # 系列名推导
+├─ library_index_test.dart    # 增量索引
+├─ folder_import_test.dart    # 文件夹 / 拖拽扫描
 ├─ library_repository_test.dart # 加载 / 保存 / 进度 / 书签 / 路径迁移
 ├─ library_p1_test.dart       # 视图/排序、重命名、存储清理、批量删除/已读、原子导入
+├─ library_p2_test.dart       # v3 迁移、组织/收藏/置顶、统计、自定义封面、备份
 ├─ library_repair_test.dart   # 丢失文件重定位、封面重建、失败回滚
 ├─ library_p1_screen_test.dart # 搜索筛选、列表、多选、重命名、缺文件、存储面板
+├─ library_p2_screen_test.dart # 收藏/系列/标签筛选、系列页、组织编辑、统计/备份面板
 ├─ library_screen_test.dart
 ├─ encrypted_sample.pdf       # 加密测试样本（密码 manhua123）
 └─ VOL.001.pdf / .mobi        # 本地可选漫画样本（不随仓库提交）
@@ -177,7 +205,7 @@ flutter analyze
 flutter test
 ```
 
-当前 41 个测试（本机样本齐全时全部通过；公开仓库不含 `test/VOL.001.*`，缺失的相关测试会自动跳过），包括：
+当前 61 个测试（本机样本齐全时全部通过；公开仓库不含 `test/VOL.001.*`，缺失的相关测试会自动跳过），包括：
 
 - 真实样本 `test/VOL.001.mobi`：196 页、EXTH 封面、HTML `<img recindex>` 阅读顺序、尺寸解析、按页懒读取、非法文件拒绝。
 - 真实样本 `test/VOL.001.pdf`：打开 196 页文档、确认无内嵌 outline、用 PDFium 渲染首页并读取像素。
@@ -192,6 +220,10 @@ flutter test
 - P1 导入原子性：失败导入不会留下 `.part` 或半成品副本。
 - P1 文件修复：重定位后保留标题 / 进度 / 书签，失败时不动原书；封面重建与源文件丢失处理。
 - P1 书架 UI：搜索与空结果、格式 / 状态筛选、列表切换、多选 / 全选 / 退出、重命名、缺失文件提示、存储面板。
+- P2 数据与组织：v2 → v3 迁移、系列推导、系列 / 标签 / 收藏 / 置顶持久化、置顶排序。
+- P2 统计与封面：日 / 周 / 连续阅读统计、JSON 往返与合并、自定义封面校验。
+- P2 备份：JSON 清单、完整 ZIP（文件 + 封面）、重复跳过、缺失文件恢复、无效备份拒绝。
+- P2 导入与 UI：文件夹 / 拖拽路径扫描、收藏/系列/标签筛选、系列合并页、组织信息编辑、统计与备份面板。
 - iOS 等平台容器路径变化后的文件 / 封面路径自动迁移。
 - 空书架界面冒烟测试。
 
@@ -230,9 +262,15 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 - **双页**：`buildSpreads` 采用「封面单页 + (2,3)、(4,5)…」配对；每跨按可用宽高比缩放两页，RTL 时交换左右页；跨页整体支持双击缩放。
 - **统一体验**：两种格式共用一个阅读器、同一套手势、模式、进度、书签与设置；MOBI 图片解码后以 `ui.Image` 管理生命周期，离屏即释放。
 - **进度**：每页变化即时写入书架内存并做 450ms 去抖落盘；退出阅读器 / 应用进入后台时强制 flush。
-- **P1 书架**：搜索与筛选在内存中完成，不改动书架顺序；排序 / 视图偏好与书架一起写入 `library.json`（schema `version: 2`）。重命名只改 `title`，原文件名保留用于重复检测。
+- **P1 书架**：搜索与筛选在内存中完成，不改动书架顺序；排序 / 视图偏好与书架一起写入 `library.json`（当前 schema `version: 3`）。重命名只改 `title`，原文件名保留用于重复检测。
 - **P1 存储与修复**：`storageReport()` 按 `books/`、`covers/`、`cache/` 实际扫描，区分被引用文件、缓存与无引用文件；`cleanupStorage()` 只删除后两类。重定位 / 封面重建使用带时间戳的新文件名，避免 Flutter 图片缓存显示旧图；重定位成功后才删除旧文件并清理越界书签。
 - **P1 原子导入**：所有导入先写 `<id>.ext.part`，复制完成后 `rename` 为目标文件；解析或封面失败时统一回滚副本、`.part` 与半成品封面。
+- **P2 组织与索引**：`LibraryIndex` 在启动时构建，并在导入、删除、重命名、系列/标签编辑时增量更新；搜索覆盖书名、原始文件名、系列与标签。`LibrarySort` 排序前先比较 `pinned`；收藏只影响筛选。
+- **P2 系列**：导入时用 `deriveSeriesName()` 从 `VOL.001`、`第12卷`、`v03` 等标题推导系列提示；用户可在「系列与标签」中覆盖。系列名按大小写不敏感分组，卷内按标题排序。
+- **P2 阅读统计**：`ReadingStats` 按本地日期记录前进页数（只统计页码增大），提供今日、本周、连续天数、最长连续与最近 7 天数据；无数据时显示空态；批量标记已读不计入翻页统计。
+- **P2 备份**：JSON 清单使用相对路径（不含文件字节）；完整备份用 `archive` 流式写入 `cache/` 后再导出 `.mrbackup`。恢复按 id / 原始名+大小跳过重复，ZIP 中的文件逐本写入 `.part` 后改名，统计按每日最大值合并。
+- **P2 导入入口**：FAB 提供「文件 / 文件夹」选择；桌面端文件夹递归扫描，Windows / Linux / macOS 支持把文件或文件夹拖入窗口；Android 使用 `manhua/saf` 原生通道列出并复制 SAF 文档。
+- **P2 自定义封面**：`setCustomCover()` 将本地图片解码并缩放到 520px PNG；`customCover` 随书保存，重新生成封面会恢复自动封面。
 
 ## 已知限制
 
@@ -242,6 +280,11 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 - 双页模式仅用于横向模式，采用「封面单页」配对；暂不支持自动识别跨页扫描、自动裁边或左右装订方向自动判断。
 - 书签名称/备注为纯文本，暂不支持富文本、搜索或跨书签分类。
 - 批量操作（删除 / 标记已读）没有撤销；删除前会二次确认。
+- P2 的「增量索引」目前是进程内索引，`library.json` 仍是唯一持久化来源；SQLite / Isar 迁移按方案保留，适合书架超过约 1000 本后再引入。
+- 完整 ZIP 备份会先在内存中读取压缩包再交给系统保存；书架包含多个 100MB 以上文件时建议先导出 JSON 或分批备份。
+- Android SAF 文件夹导入通过原生 `MethodChannel` 实现，但当前环境没有 Android SDK / 设备，未能编译与真机验证；Windows Release 构建通过，桌面文件夹选择与拖拽建议在桌面手动验收。
+- 系列名推导是启发式规则，可能误判特殊标题；可在「系列与标签」中手动修正。
+- 阅读统计按翻页页数而非去重页面统计；使用页码滑杆跳页会按跨越页数计入。
 - Windows **Release** 增量构建在新增 Material 图标后，Flutter 的图标字体子集偶尔不会刷新，表现为按钮空白或图标缺失。遇到时删除 `build/windows/x64/runner/Release` 后重新执行 `flutter build windows --release --no-pub` 即可；Debug 构建不受影响。
 - 放大为位图缩放，极限放大的清晰度受当前渲染分辨率限制。
 - 暂无注释、夜间滤镜、自动翻页等功能。

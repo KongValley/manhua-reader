@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:archive/archive_io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:pdfrx/pdfrx.dart';
@@ -13,8 +14,11 @@ import '../models/comic_book.dart';
 import '../models/library_settings.dart';
 import '../models/library_storage_report.dart';
 import '../models/reader_settings.dart';
+import '../models/reading_stats.dart';
+import '../utils/series.dart';
 import 'app_paths.dart';
 import 'cover_generator.dart';
+import 'library_index.dart';
 import 'pdf_password_cache.dart';
 
 class ImportException implements Exception {
@@ -37,6 +41,9 @@ class LibraryRepository extends ChangeNotifier {
   final List<ComicBook> _books = [];
   ReaderSettings settings = ReaderSettings();
   LibrarySettings librarySettings = LibrarySettings();
+  ReadingStats stats = ReadingStats();
+
+  final LibraryIndex _index = LibraryIndex();
 
   Timer? _saveTimer;
   bool _saved = false;
@@ -49,21 +56,36 @@ class LibraryRepository extends ChangeNotifier {
 
   List<ComicBook> get books => List<ComicBook>.unmodifiable(_books);
 
+  List<String> get seriesNames => _index.seriesNames;
+  List<String> get tagNames => _index.tagNames;
+  Map<String, int> get seriesCounts => _index.seriesCounts;
+  Map<String, int> get tagCounts => _index.tagCounts;
+
+  bool matchesSearch(ComicBook book, String query) =>
+      _index.matches(book, query);
+
   ComicBook? get lastRead {
+    ComicBook? latest;
     for (final book in _books) {
-      if (book.lastReadAt != null) return book;
+      final readAt = book.lastReadAt;
+      if (readAt == null) continue;
+      if (latest == null || readAt.isAfter(latest.lastReadAt!)) {
+        latest = book;
+      }
     }
-    return null;
+    return latest;
   }
 
   bool fileExists(ComicBook book) => File(book.filePath).existsSync();
 
   Future<void> load() async {
+    var loadedVersion = 1;
     try {
       final file = paths.libraryFile;
       if (await file.exists()) {
         final decoded = jsonDecode(await file.readAsString());
         if (decoded is Map<String, dynamic>) {
+          loadedVersion = (decoded['version'] as num?)?.toInt() ?? 1;
           final booksJson = decoded['books'];
           if (booksJson is List) {
             _books
@@ -95,10 +117,25 @@ class LibraryRepository extends ChangeNotifier {
                   )
                 : null,
           );
+          stats = ReadingStats.fromJson(
+            decoded['stats'] is Map
+                ? (decoded['stats'] as Map).map(
+                    (key, value) => MapEntry('$key', value),
+                  )
+                : null,
+          );
         }
       }
     } catch (error, stack) {
       debugPrint('Library load failed: $error\n$stack');
+    }
+
+    if (loadedVersion < 3) {
+      // Version 3 introduces series/tag organization. Derive a series hint
+      // from titles such as "VOL.001" or "海贼王 第12卷" once during migration.
+      for (final book in _books) {
+        book.series ??= deriveSeriesName(book.title, book.originalName);
+      }
     }
 
     for (final book in _books) {
@@ -118,6 +155,7 @@ class LibraryRepository extends ChangeNotifier {
         book.coverPath = candidate.existsSync() ? candidate.path : null;
       }
     }
+    _index.rebuild(_books);
     _sortBooks();
     _saved = true;
     notifyListeners();
@@ -269,9 +307,11 @@ class LibraryRepository extends ChangeNotifier {
         fileSize: fileSize,
         addedAt: DateTime.now(),
         coverPath: coverPath,
+        series: deriveSeriesName(info.title, originalName),
       );
 
       _books.insert(0, book);
+      _index.upsert(book);
       await _saveNow();
       notifyListeners();
       onProgress?.call('导入完成', 1);
@@ -397,6 +437,7 @@ class LibraryRepository extends ChangeNotifier {
       book.pageCount = info.pageCount;
       book.fileSize = await destination.length();
       book.coverPath = newCoverPath;
+      book.customCover = false;
       book.lastPage = _clampPage(book.lastPage, book.pageCount);
       book.bookmarks.removeWhere(
         (bookmark) => bookmark.page < 0 || bookmark.page >= book.pageCount,
@@ -448,6 +489,7 @@ class LibraryRepository extends ChangeNotifier {
       newCoverPath = info.coverPath;
       final oldCover = book.coverPath;
       book.coverPath = newCoverPath;
+      book.customCover = false;
       if (book.pageCount != info.pageCount) {
         book.pageCount = info.pageCount;
         book.lastPage = _clampPage(book.lastPage, book.pageCount);
@@ -467,6 +509,27 @@ class LibraryRepository extends ChangeNotifier {
       if (newCoverPath != null) await _deleteQuietly(File(newCoverPath));
       return false;
     }
+  }
+
+  /// Replaces the cover with a user-picked image, normalised to a 520px PNG.
+  Future<bool> setCustomCover(ComicBook book, Uint8List bytes) async {
+    if (bytes.isEmpty) return false;
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final cover = File(p.join(paths.coversDir.path, '${book.id}_u$stamp.png'));
+    final newPath = await CoverGenerator.fromImageBytes(bytes, cover.path);
+    if (newPath == null) {
+      await _deleteQuietly(cover);
+      return false;
+    }
+    final oldCover = book.coverPath;
+    book.coverPath = newPath;
+    book.customCover = true;
+    await _saveNow();
+    notifyListeners();
+    if (oldCover != null && oldCover != newPath) {
+      await _deleteQuietly(File(oldCover));
+    }
+    return true;
   }
 
   Future<LibraryStorageReport> storageReport() async {
@@ -536,6 +599,311 @@ class LibraryRepository extends ChangeNotifier {
     return freed;
   }
 
+  static const String backupFormat = 'manhua-reader-backup';
+  static const int backupVersion = 1;
+
+  /// Exports shelf metadata, bookmarks, organization and statistics as JSON.
+  /// File paths are relative; the JSON alone does not include comic bytes.
+  Uint8List exportBackupJson() {
+    final manifest = _buildBackupManifest(includeFiles: false);
+    return Uint8List.fromList(
+      utf8.encode(const JsonEncoder.withIndent('  ').convert(manifest)),
+    );
+  }
+
+  /// Builds a ZIP backup containing `manifest.json`, books and covers.
+  Future<File> createBackupArchive({ImportProgressCallback? onProgress}) async {
+    await paths.cacheDir.create(recursive: true);
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final archiveFile = File(
+      p.join(paths.cacheDir.path, 'manhua_backup_$stamp.mrbackup'),
+    );
+    final encoder = ZipFileEncoder();
+    encoder.create(archiveFile.path, level: ZipFileEncoder.store);
+    try {
+      final manifestBytes = utf8.encode(
+        const JsonEncoder.withIndent('  ')
+            .convert(_buildBackupManifest(includeFiles: true)),
+      );
+      encoder.addArchiveFile(
+        ArchiveFile('manifest.json', manifestBytes.length, manifestBytes),
+      );
+
+      final total = max(1, _books.length);
+      var done = 0;
+      for (final book in _books) {
+        final source = File(book.filePath);
+        if (await source.exists()) {
+          await encoder.addFile(
+            source,
+            _relativeBookPath(book),
+            ZipFileEncoder.store,
+          );
+        }
+        final coverPath = book.coverPath;
+        if (coverPath != null) {
+          final cover = File(coverPath);
+          if (await cover.exists()) {
+            await encoder.addFile(
+              cover,
+              _relativeCoverPath(book)!,
+              ZipFileEncoder.store,
+            );
+          }
+        }
+        done++;
+        onProgress?.call('正在打包 ${book.title}', done / total);
+      }
+      await encoder.close();
+      return archiveFile;
+    } catch (error) {
+      try {
+        await encoder.close();
+      } catch (_) {}
+      await _deleteQuietly(archiveFile);
+      rethrow;
+    }
+  }
+
+  /// Restores a JSON manifest or a ZIP backup. Existing books are kept and
+  /// duplicates are skipped; statistics are merged by per-day maxima.
+  Future<BackupImportResult> restoreBackupBytes(
+    Uint8List bytes, {
+    ImportProgressCallback? onProgress,
+  }) async {
+    Archive? archive;
+    Map<String, Object?> manifest;
+    try {
+      if (_looksLikeZip(bytes)) {
+        archive = ZipDecoder().decodeBytes(bytes);
+        final entry = archive.findFile('manifest.json');
+        if (entry == null) {
+          throw ImportException('备份压缩包缺少 manifest.json');
+        }
+        manifest = _decodeBackupManifest(entry.readBytes() ?? Uint8List(0));
+      } else {
+        manifest = _decodeBackupManifest(bytes);
+      }
+    } on ImportException {
+      rethrow;
+    } catch (error) {
+      throw ImportException('无法读取备份：$error');
+    }
+
+    if (manifest['format'] != backupFormat) {
+      throw ImportException('这不是漫阅书架备份文件');
+    }
+    final rawBooks = manifest['books'];
+    if (rawBooks is! List) {
+      throw ImportException('备份文件缺少书架数据');
+    }
+
+    final result = BackupImportResult();
+    final wasEmpty = _books.isEmpty;
+    final backupStats = ReadingStats.fromJson(
+      manifest['stats'] is Map
+          ? (manifest['stats'] as Map).map(
+              (key, value) => MapEntry('$key', value),
+            )
+          : null,
+    );
+
+    final total = max(1, rawBooks.length);
+    for (var index = 0; index < rawBooks.length; index++) {
+      final raw = rawBooks[index];
+      if (raw is! Map) {
+        result.failed++;
+        result.errors.add('第 ${index + 1} 本：数据格式不正确');
+        continue;
+      }
+      final map = raw.map((key, value) => MapEntry('$key', value));
+      final title = '${map['title'] ?? '未命名'}';
+      try {
+        final formatName = '${map['format'] ?? ''}';
+        final format = ComicFormat.fromName(formatName);
+        final extension = format.extension;
+        final declaredSize = (map['fileSize'] as num?)?.toInt() ?? 0;
+        final originalName = '${map['originalName'] ?? ''}';
+        var id = '${map['id'] ?? ''}';
+        final relativePath = _safeArchivePath(map['filePath']);
+        final relativeCover = _safeArchivePath(map['coverPath']);
+
+        if (id.isEmpty) id = _newId();
+        final duplicate = _books.any(
+          (book) =>
+              book.id == id ||
+              (originalName.isNotEmpty &&
+                  book.originalName == originalName &&
+                  book.fileSize == declaredSize),
+        );
+        if (duplicate) {
+          result.skipped++;
+          continue;
+        }
+
+        var destination = File(
+          p.join(
+            paths.booksDir.path,
+            relativePath.isNotEmpty
+                ? p.basename(relativePath)
+                : '$id.$extension',
+          ),
+        );
+        if (await destination.exists()) {
+          id = _newId();
+          destination = File(p.join(paths.booksDir.path, '$id.$extension'));
+        }
+
+        final archiveEntry = relativePath.isEmpty
+            ? null
+            : archive?.findFile(relativePath);
+        var hasFile = await destination.exists();
+        if (archiveEntry != null) {
+          await _writeArchiveEntry(archiveEntry, destination);
+          hasFile = true;
+        }
+
+        String? coverPath;
+        final coverEntry = relativeCover.isEmpty
+            ? null
+            : archive?.findFile(relativeCover);
+        if (coverEntry != null) {
+          coverPath = p.join(
+            paths.coversDir.path,
+            '${id}_b${DateTime.now().millisecondsSinceEpoch}.png',
+          );
+          await _writeArchiveEntry(coverEntry, File(coverPath));
+        } else if (relativeCover.isNotEmpty) {
+          final existingCover = File(
+            p.join(paths.coversDir.path, p.basename(relativeCover)),
+          );
+          if (await existingCover.exists()) coverPath = existingCover.path;
+        }
+
+        map['id'] = id;
+        map['filePath'] = destination.path;
+        map['coverPath'] = coverPath;
+        final book = ComicBook.fromJson(map);
+        if (hasFile) {
+          book.fileSize = await destination.length();
+        }
+        _books.add(book);
+        _index.upsert(book);
+        result.imported++;
+        if (!hasFile) result.booksWithoutFiles++;
+      } catch (error) {
+        result.failed++;
+        result.errors.add('$title：$error');
+      }
+      onProgress?.call('正在恢复 $title', (index + 1) / total);
+    }
+
+    if (wasEmpty) {
+      settings = ReaderSettings.fromJson(
+        manifest['settings'] is Map
+            ? (manifest['settings'] as Map).map(
+                (key, value) => MapEntry('$key', value),
+              )
+            : null,
+      );
+      librarySettings = LibrarySettings.fromJson(
+        manifest['library'] is Map
+            ? (manifest['library'] as Map).map(
+                (key, value) => MapEntry('$key', value),
+              )
+            : null,
+      );
+    }
+    stats.merge(backupStats);
+    _sortBooks();
+    await _saveNow();
+    notifyListeners();
+    onProgress?.call('恢复完成', 1);
+    return result;
+  }
+
+  Map<String, Object?> _buildBackupManifest({required bool includeFiles}) {
+    final books = <Map<String, Object?>>[];
+    final fileList = <Map<String, Object?>>[];
+    for (final book in _books) {
+      final json = book.toJson();
+      json['filePath'] = _relativeBookPath(book);
+      json['coverPath'] = _relativeCoverPath(book);
+      books.add(json);
+      fileList.add({
+        'id': book.id,
+        'title': book.title,
+        'path': _relativeBookPath(book),
+        'cover': _relativeCoverPath(book),
+        'size': book.fileSize,
+        'available': File(book.filePath).existsSync(),
+      });
+    }
+    return {
+      'format': backupFormat,
+      'version': backupVersion,
+      'app': 'manhua_reader',
+      'exportedAt': DateTime.now().toIso8601String(),
+      'includeFiles': includeFiles,
+      'bookCount': _books.length,
+      'settings': settings.toJson(),
+      'library': librarySettings.toJson(),
+      'stats': stats.toJson(),
+      'books': books,
+      'fileList': fileList,
+    };
+  }
+
+  Map<String, Object?> _decodeBackupManifest(Uint8List bytes) {
+    var start = 0;
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xEF &&
+        bytes[1] == 0xBB &&
+        bytes[2] == 0xBF) {
+      start = 3;
+    }
+    final decoded = jsonDecode(utf8.decode(bytes.sublist(start)));
+    if (decoded is! Map) throw ImportException('备份文件格式不正确');
+    return decoded.map((key, value) => MapEntry('$key', value));
+  }
+
+  bool _looksLikeZip(Uint8List bytes) {
+    return bytes.length >= 4 &&
+        bytes[0] == 0x50 &&
+        bytes[1] == 0x4B &&
+        bytes[2] == 0x03 &&
+        bytes[3] == 0x04;
+  }
+
+  String _relativeBookPath(ComicBook book) =>
+      'books/${p.basename(book.filePath)}';
+
+  String? _relativeCoverPath(ComicBook book) {
+    final cover = book.coverPath;
+    return cover == null ? null : 'covers/${p.basename(cover)}';
+  }
+
+  String _safeArchivePath(Object? value) {
+    final text = '${value ?? ''}'.replaceAll('\\', '/').trim();
+    if (text.isEmpty || text.startsWith('/') || text.contains('..')) return '';
+    if (!text.startsWith('books/') && !text.startsWith('covers/')) return '';
+    return text;
+  }
+
+  Future<void> _writeArchiveEntry(ArchiveFile entry, File destination) async {
+    final data = entry.readBytes();
+    if (data == null) throw ImportException('无法解压 ${entry.name}');
+    await destination.parent.create(recursive: true);
+    final part = File('${destination.path}.part');
+    await part.writeAsBytes(data, flush: true);
+    try {
+      await part.rename(destination.path);
+    } catch (_) {
+      await destination.writeAsBytes(data, flush: true);
+      await _deleteQuietly(part);
+    }
+  }
+
   void _checkDuplicate(String originalName, int fileSize) {
     if (_books.any(
       (book) => book.originalName == originalName && book.fileSize == fileSize,
@@ -548,8 +916,13 @@ class LibraryRepository extends ChangeNotifier {
 
   void updateProgress(ComicBook book, int page) {
     final clamped = book.pageCount <= 0 ? 0 : page.clamp(0, book.pageCount - 1);
+    final previous = book.safeLastPage;
+    final now = DateTime.now();
+    if (clamped > previous) {
+      stats.addPages(clamped - previous, now);
+    }
     book.lastPage = clamped;
-    book.lastReadAt = DateTime.now();
+    book.lastReadAt = now;
     _moveToFront(book);
     notifyListeners();
     _scheduleSave();
@@ -644,6 +1017,7 @@ class LibraryRepository extends ChangeNotifier {
     if (targets.isEmpty) return;
     for (final book in targets) {
       _books.remove(book);
+      _index.remove(book);
       PdfPasswordCache.remove(book.filePath);
     }
     notifyListeners();
@@ -692,6 +1066,38 @@ class LibraryRepository extends ChangeNotifier {
     final next = title.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (next.isEmpty || next.length > 100 || next == book.title) return;
     book.title = next;
+    _index.upsert(book);
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  void toggleFavorite(ComicBook book) {
+    book.favorite = !book.favorite;
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  void togglePinned(ComicBook book) {
+    book.pinned = !book.pinned;
+    _sortBooks();
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  /// Updates the user-managed series and tags for one book.
+  void setBookOrganization(
+    ComicBook book, {
+    required String? series,
+    required List<String> tags,
+  }) {
+    final cleanSeries = _cleanSeries(series);
+    final cleanTags = _cleanTags(tags);
+    final sameSeries = cleanSeries == book.series;
+    final sameTags = listEquals(cleanTags, book.tags);
+    if (sameSeries && sameTags) return;
+    book.series = cleanSeries;
+    book.tags = cleanTags;
+    _index.upsert(book);
     notifyListeners();
     _scheduleSave();
   }
@@ -719,7 +1125,10 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   void _sortBooks() {
-    _books.sort((a, b) => b.lastActivity.compareTo(a.lastActivity));
+    _books.sort((a, b) {
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      return b.lastActivity.compareTo(a.lastActivity);
+    });
   }
 
   void _scheduleSave() {
@@ -739,9 +1148,10 @@ class LibraryRepository extends ChangeNotifier {
         _dirty = false;
         _sortBooks();
         final payload = jsonEncode({
-          'version': 2,
+          'version': 3,
           'settings': settings.toJson(),
           'library': librarySettings.toJson(),
+          'stats': stats.toJson(),
           'books': _books.map((book) => book.toJson()).toList(),
         });
         final temp = File('${paths.libraryFile.path}.tmp');
@@ -841,6 +1251,23 @@ class LibraryRepository extends ChangeNotifier {
     return title.isEmpty ? '未命名漫画' : title;
   }
 
+  String? _cleanSeries(String? value) {
+    final text = value?.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text == null || text.isEmpty) return null;
+    return text.length <= 60 ? text : text.substring(0, 60);
+  }
+
+  List<String> _cleanTags(Iterable<String> values) {
+    final tags = <String>[];
+    for (final value in values) {
+      final tag = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (tag.isEmpty || tags.contains(tag)) continue;
+      tags.add(tag.length <= 24 ? tag : tag.substring(0, 24));
+      if (tags.length >= 20) break;
+    }
+    return tags;
+  }
+
   String? _cleanBookmarkText(String? value, int maxLength) {
     final text = value?.trim();
     if (text == null || text.isEmpty) return null;
@@ -878,4 +1305,12 @@ class _InspectedComic {
   final String title;
   final int pageCount;
   final String? coverPath;
+}
+
+class BackupImportResult {
+  int imported = 0;
+  int skipped = 0;
+  int failed = 0;
+  int booksWithoutFiles = 0;
+  final List<String> errors = <String>[];
 }

@@ -1,20 +1,37 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/comic_book.dart';
 import '../models/library_settings.dart';
+import '../services/folder_import.dart';
 import '../services/library_repository.dart';
 import '../services/pdf_password_cache.dart';
+import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
+import '../widgets/backup_sheet.dart';
 import '../widgets/book_cover.dart';
+import '../widgets/book_organization_dialog.dart';
 import '../widgets/library_storage_sheet.dart';
 import '../widgets/pdf_password_dialog.dart';
+import '../widgets/reading_stats_sheet.dart';
 import 'reader_screen.dart';
+import 'series_screen.dart';
+
+class _ImportCandidate {
+  const _ImportCandidate({required this.name, this.path, this.file, this.saf});
+
+  final String name;
+  final String? path;
+  final PlatformFile? file;
+  final SafFile? saf;
+}
 
 enum _ReadFilter {
   all('全部'),
@@ -32,11 +49,17 @@ class _LibraryFilterResult {
     required this.sort,
     required this.format,
     required this.readFilter,
+    required this.series,
+    required this.tag,
+    required this.favoritesOnly,
   });
 
   final LibrarySort sort;
   final ComicFormat? format;
   final _ReadFilter readFilter;
+  final String? series;
+  final String? tag;
+  final bool favoritesOnly;
 }
 
 class _ProgressState {
@@ -62,7 +85,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   String _query = '';
   ComicFormat? _formatFilter;
   _ReadFilter _readFilter = _ReadFilter.all;
+  String? _seriesFilter;
+  String? _tagFilter;
+  bool _favoritesOnly = false;
   bool _selectionMode = false;
+  bool _dragActive = false;
 
   bool _importing = false;
   bool _cancelImport = false;
@@ -79,41 +106,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
     super.dispose();
   }
 
+  bool get _supportsDesktopDrop =>
+      !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+
   bool get _hasActiveFilters =>
       _query.trim().isNotEmpty ||
       _formatFilter != null ||
-      _readFilter != _ReadFilter.all;
+      _readFilter != _ReadFilter.all ||
+      _seriesFilter != null ||
+      _tagFilter != null ||
+      _favoritesOnly;
 
   List<ComicBook> _visibleBooks(List<ComicBook> books) {
     final query = _query.trim().toLowerCase();
     final filtered = books.where((book) {
       if (_formatFilter != null && book.format != _formatFilter) return false;
+      if (_favoritesOnly && !book.favorite) return false;
+      if (_seriesFilter != null &&
+          (book.series ?? '').toLowerCase() != _seriesFilter!.toLowerCase()) {
+        return false;
+      }
+      if (_tagFilter != null && !book.tags.contains(_tagFilter)) return false;
       if (!_matchesReadFilter(book)) return false;
-      if (query.isNotEmpty) {
-        final title = book.title.toLowerCase();
-        final original = book.originalName.toLowerCase();
-        if (!title.contains(query) && !original.contains(query)) return false;
+      if (query.isNotEmpty && !_repository.matchesSearch(book, query)) {
+        return false;
       }
       return true;
     }).toList();
 
-    switch (_repository.librarySettings.sort) {
-      case LibrarySort.recentRead:
-        filtered.sort((a, b) => b.lastActivity.compareTo(a.lastActivity));
-      case LibrarySort.recentlyAdded:
-        filtered.sort((a, b) => b.addedAt.compareTo(a.addedAt));
-      case LibrarySort.title:
-        filtered.sort(
-          (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-        );
-      case LibrarySort.progress:
-        filtered.sort((a, b) {
+    final sort = _repository.librarySettings.sort;
+    filtered.sort((a, b) {
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      switch (sort) {
+        case LibrarySort.recentRead:
+          return b.lastActivity.compareTo(a.lastActivity);
+        case LibrarySort.recentlyAdded:
+          return b.addedAt.compareTo(a.addedAt);
+        case LibrarySort.title:
+          return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+        case LibrarySort.progress:
           final result = b.progress.compareTo(a.progress);
           return result != 0
               ? result
               : b.lastActivity.compareTo(a.lastActivity);
-        });
-    }
+      }
+    });
     return filtered;
   }
 
@@ -157,6 +194,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _query = '';
       _formatFilter = null;
       _readFilter = _ReadFilter.all;
+      _seriesFilter = null;
+      _tagFilter = null;
+      _favoritesOnly = false;
       _selectionMode = false;
       _selectedIds.clear();
     });
@@ -173,6 +213,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void _clearReadFilter() {
     setState(() {
       _readFilter = _ReadFilter.all;
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _clearSeriesFilter() {
+    setState(() {
+      _seriesFilter = null;
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _clearTagFilter() {
+    setState(() {
+      _tagFilter = null;
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _clearFavoritesFilter() {
+    setState(() {
+      _favoritesOnly = false;
       _selectionMode = false;
       _selectedIds.clear();
     });
@@ -195,6 +259,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
         initialSort: _repository.librarySettings.sort,
         initialFormat: _formatFilter,
         initialReadFilter: _readFilter,
+        initialSeries: _seriesFilter,
+        initialTag: _tagFilter,
+        initialFavoritesOnly: _favoritesOnly,
+        seriesCounts: _repository.seriesCounts,
+        tagCounts: _repository.tagCounts,
       ),
     );
     if (!mounted || result == null) return;
@@ -202,6 +271,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     setState(() {
       _formatFilter = result.format;
       _readFilter = result.readFilter;
+      _seriesFilter = result.series;
+      _tagFilter = result.tag;
+      _favoritesOnly = result.favoritesOnly;
       _selectionMode = false;
       _selectedIds.clear();
     });
@@ -266,12 +338,159 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
     if (!mounted || files.isEmpty) return;
+    await _runImportCandidates([
+      for (final file in files) _ImportCandidate(name: file.name, file: file),
+    ]);
+  }
 
+  Future<void> _showImportOptions() async {
+    if (_importing) return;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => SafeArea(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.insert_drive_file_outlined),
+                title: const Text('选择文件'),
+                subtitle: const Text('可多选 PDF / MOBI'),
+                onTap: () => Navigator.of(context).pop('files'),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.create_new_folder_outlined),
+                title: const Text('选择文件夹'),
+                subtitle: const Text('递归导入文件夹中的 PDF / MOBI'),
+                onTap: () => Navigator.of(context).pop('folder'),
+              ),
+              if (_supportsDesktopDrop)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    '也可以直接把文件或文件夹拖进书架',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'files') {
+      await _pickAndImport();
+    } else {
+      await _pickFolderAndImport();
+    }
+  }
+
+  Future<void> _pickFolderAndImport() async {
+    if (_importing) return;
+    if (SafFolderService.isSupported) {
+      String? uri;
+      List<SafFile> files;
+      try {
+        uri = await SafFolderService.pickDirectory();
+        if (uri == null) return;
+        files = await SafFolderService.listBooks(uri);
+      } catch (error) {
+        _toast('无法读取文件夹：$error');
+        return;
+      }
+      if (!mounted) return;
+      if (files.isEmpty) {
+        _toast('文件夹里没有找到 PDF / MOBI');
+        return;
+      }
+      await _runImportCandidates([
+        for (final file in files) _ImportCandidate(name: file.name, saf: file),
+      ]);
+      return;
+    }
+
+    Uri? uri;
+    try {
+      uri = await FilePicker.pickDirectory(dialogTitle: '选择漫画文件夹');
+    } catch (error) {
+      _toast('无法打开文件夹选择器：$error');
+      return;
+    }
+    if (!mounted || uri == null) return;
+    if (uri.scheme != 'file') {
+      _toast('当前平台无法直接读取该文件夹，请改用多选文件');
+      return;
+    }
+
+    List<File> files;
+    try {
+      files = await FolderImportScanner.scanFolder(Directory(uri.toFilePath()));
+    } catch (error) {
+      _toast('无法扫描文件夹：$error');
+      return;
+    }
+    if (!mounted) return;
+    if (files.isEmpty) {
+      _toast('文件夹里没有找到 PDF / MOBI');
+      return;
+    }
+    await _runImportCandidates([
+      for (final file in files)
+        _ImportCandidate(name: p.basename(file.path), path: file.path),
+    ]);
+  }
+
+  Future<void> _importDropped(List<String> paths) async {
+    if (_importing || paths.isEmpty) return;
+    List<File> files;
+    try {
+      files = await FolderImportScanner.expandPaths(paths);
+    } catch (error) {
+      _toast('无法读取拖入的文件：$error');
+      return;
+    }
+    if (!mounted) return;
+    if (files.isEmpty) {
+      _toast('拖入的内容里没有 PDF / MOBI');
+      return;
+    }
+    await _runImportCandidates([
+      for (final file in files)
+        _ImportCandidate(name: p.basename(file.path), path: file.path),
+    ]);
+  }
+
+  Future<void> _runImportCandidates(List<_ImportCandidate> candidates) async {
+    if (candidates.isEmpty || _importing) return;
     _searchController.clear();
     setState(() {
       _query = '';
       _formatFilter = null;
       _readFilter = _ReadFilter.all;
+      _seriesFilter = null;
+      _tagFilter = null;
+      _favoritesOnly = false;
       _selectionMode = false;
       _selectedIds.clear();
       _importing = true;
@@ -285,26 +504,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
     var imported = 0;
     var cancelled = false;
     final errors = <String>[];
-    for (var i = 0; i < files.length; i++) {
+    for (var i = 0; i < candidates.length; i++) {
       if (_cancelImport) {
         cancelled = true;
         break;
       }
-      final file = files[i];
-      final name = file.name;
+      final candidate = candidates[i];
+      final name = candidate.name;
       if (!mounted) return;
       setState(() {
-        _importLabel = '正在导入 $name（${i + 1}/${files.length}）';
-        _importProgress = i / files.length;
+        _importLabel = '正在导入 $name（${i + 1}/${candidates.length}）';
+        _importProgress = i / candidates.length;
       });
 
       void progress(String label, double value) {
         if (mounted) {
           setState(() {
-            _importLabel = files.length > 1
-                ? '$label（${i + 1}/${files.length}）'
+            _importLabel = candidates.length > 1
+                ? '$label（${i + 1}/${candidates.length}）'
                 : label;
-            _importProgress = (i + value) / files.length;
+            _importProgress = (i + value) / candidates.length;
           });
         }
       }
@@ -325,26 +544,52 @@ class _LibraryScreenState extends State<LibraryScreen> {
         return password;
       }
 
+      String? stagedPath;
       try {
-        final path = file.path;
         final ComicBook book;
-        if (path != null && path.isNotEmpty) {
+        final saf = candidate.saf;
+        final picked = candidate.file;
+        if (saf != null) {
+          progress('正在准备 $name', 0);
+          stagedPath = await SafFolderService.copyToCache(saf);
+          if (stagedPath == null || stagedPath.isEmpty) {
+            throw ImportException('无法读取文件夹中的文件');
+          }
           book = await _repository.importFile(
-            path,
+            stagedPath,
+            originalName: name,
+            onProgress: progress,
+            pdfPasswordProvider: passwordProvider,
+          );
+        } else if (picked != null) {
+          final path = picked.path;
+          if (path != null && path.isNotEmpty) {
+            book = await _repository.importFile(
+              path,
+              originalName: name,
+              onProgress: progress,
+              pdfPasswordProvider: passwordProvider,
+            );
+          } else {
+            final totalSize = await picked.length();
+            if (!mounted) return;
+            book = await _repository.importStream(
+              originalName: name,
+              stream: picked.readAsByteStream(),
+              totalSize: totalSize,
+              onProgress: progress,
+              pdfPasswordProvider: passwordProvider,
+            );
+          }
+        } else if (candidate.path != null) {
+          book = await _repository.importFile(
+            candidate.path!,
             originalName: name,
             onProgress: progress,
             pdfPasswordProvider: passwordProvider,
           );
         } else {
-          final totalSize = await file.length();
-          if (!mounted) return;
-          book = await _repository.importStream(
-            originalName: name,
-            stream: file.readAsByteStream(),
-            totalSize: totalSize,
-            onProgress: progress,
-            pdfPasswordProvider: passwordProvider,
-          );
+          throw ImportException('无法读取文件');
         }
         PdfPasswordCache.put(book.filePath, lastPassword);
         imported++;
@@ -352,6 +597,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
         errors.add('$name：${error.message}');
       } catch (error) {
         errors.add('$name：$error');
+      } finally {
+        if (stagedPath != null) {
+          try {
+            final temp = File(stagedPath);
+            if (await temp.exists()) await temp.delete();
+          } catch (_) {}
+        }
       }
       if (mounted) {
         setState(() {
@@ -405,6 +657,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _showBookActions(ComicBook book) async {
     final missing = !_repository.fileExists(book);
+    final organization = [
+      if (book.series != null) '系列：${book.series}',
+      if (book.tags.isNotEmpty) book.tags.map((tag) => '#$tag').join(' '),
+    ].join(' · ');
     final action = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
@@ -486,6 +742,64 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ),
                 ],
                 const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => Navigator.of(context).pop('favorite'),
+                        icon: IgnorePointer(
+                          child: Icon(
+                            book.favorite
+                                ? Icons.star_rounded
+                                : Icons.star_border_rounded,
+                            size: 17,
+                            color: book.favorite
+                                ? AppColors.accent
+                                : AppColors.textSecondary,
+                          ),
+                        ),
+                        label: Text(book.favorite ? '已收藏' : '收藏'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: book.favorite
+                              ? AppColors.accent
+                              : AppColors.textPrimary,
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => Navigator.of(context).pop('pin'),
+                        icon: IgnorePointer(
+                          child: Icon(
+                            book.pinned
+                                ? Icons.push_pin_rounded
+                                : Icons.push_pin_outlined,
+                            size: 17,
+                            color: book.pinned
+                                ? AppColors.accent
+                                : AppColors.textSecondary,
+                          ),
+                        ),
+                        label: Text(book.pinned ? '已置顶' : '置顶'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: book.pinned
+                              ? AppColors.accent
+                              : AppColors.textPrimary,
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
                 if (!missing)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -506,6 +820,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   subtitle: const Text('只修改书架显示名称，不改变原文件'),
                   onTap: () => Navigator.of(context).pop('rename'),
                 ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.collections_bookmark_outlined),
+                  title: const Text('系列与标签'),
+                  subtitle: Text(
+                    organization.isEmpty ? '用于系列合并展示与标签筛选' : organization,
+                  ),
+                  onTap: () => Navigator.of(context).pop('organize'),
+                ),
                 if (missing)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -514,14 +837,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     subtitle: const Text('选择一个替换文件，保留阅读进度和书签'),
                     onTap: () => Navigator.of(context).pop('relink'),
                   )
-                else
+                else ...[
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.photo_outlined),
+                    title: const Text('更换封面'),
+                    subtitle: const Text('从本地图片选择自定义封面'),
+                    onTap: () => Navigator.of(context).pop('customCover'),
+                  ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.image_outlined),
                     title: const Text('重新生成封面'),
-                    subtitle: const Text('封面损坏或想更新时使用'),
+                    subtitle: Text(
+                      book.customCover ? '恢复为自动生成的第一页封面' : '封面损坏或想更新时使用',
+                    ),
                     onTap: () => Navigator.of(context).pop('cover'),
                   ),
+                ],
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(
@@ -544,16 +877,67 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     if (!mounted || action == null) return;
     switch (action) {
+      case 'favorite':
+        _repository.toggleFavorite(book);
+        _toast(book.favorite ? '已收藏《${book.title}》' : '已取消收藏');
+      case 'pin':
+        _repository.togglePinned(book);
+        _toast(book.pinned ? '已置顶《${book.title}》' : '已取消置顶');
       case 'read':
         await _openBook(book);
       case 'rename':
         await _showRenameDialog(book);
+      case 'organize':
+        await _showOrganizationDialog(book);
       case 'relink':
         await _relinkBook(book);
+      case 'customCover':
+        await _pickCustomCover(book);
       case 'cover':
         await _regenerateCover(book);
       case 'delete':
         await _deleteBook(book);
+    }
+  }
+
+  Future<void> _showOrganizationDialog(ComicBook book) async {
+    final result = await showBookOrganizationDialog(
+      context,
+      book: book,
+      knownSeries: _repository.seriesNames,
+      knownTags: _repository.tagNames,
+    );
+    if (!mounted || result == null) return;
+    _repository.setBookOrganization(
+      book,
+      series: result.series,
+      tags: result.tags,
+    );
+    _toast('系列与标签已更新');
+  }
+
+  Future<void> _pickCustomCover(ComicBook book) async {
+    PlatformFile? picked;
+    try {
+      picked = await FilePicker.pickFile(
+        dialogTitle: '选择封面图片',
+        type: FileType.image,
+      );
+    } catch (error) {
+      _toast('无法打开图片选择器：$error');
+      return;
+    }
+    if (picked == null || !mounted) return;
+    try {
+      final bytes = await picked.readAsBytes();
+      final ok = await _runWithProgress<bool>(
+        '正在生成封面…',
+        (_) => _repository.setCustomCover(book, bytes),
+      );
+      if (!mounted) return;
+      _toast(ok == true ? '封面已更新' : '封面生成失败，请换一张图片');
+    } catch (error) {
+      if (mounted) _toast('封面更新失败：$error');
     }
   }
 
@@ -808,6 +1192,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  Future<void> _showSeries() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => SeriesScreen(repository: _repository),
+      ),
+    );
+  }
+
+  Future<void> _showStats() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ReadingStatsSheet(repository: _repository),
+    );
+  }
+
+  Future<void> _showBackup() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => BackupSheet(repository: _repository),
+    );
+  }
+
   Future<void> _showImportErrors(List<String> errors) async {
     if (!mounted) return;
     await showDialog<void>(
@@ -863,10 +1273,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 横向翻页 / 纵向滚动，双击可放大'),
               Text('· 目录、书签（名称/备注）、缩略图导航'),
               Text('· 双页模式、加密 PDF 解锁'),
+              Text('· 搜索筛选、批量管理、系列与标签'),
+              Text('· 阅读统计、JSON / 完整备份'),
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.0.0'),
+              Text('版本 1.2.0'),
             ],
           ),
         ),
@@ -889,7 +1301,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return PopScope<void>(
+    final content = PopScope<void>(
       canPop: !_importing && !_selectionMode,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
@@ -924,6 +1336,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(20, 20, 12, 0),
                           child: _Header(
+                            onImportFolder: _pickFolderAndImport,
+                            onSeries: _showSeries,
+                            onStats: _showStats,
+                            onBackup: _showBackup,
                             onStorage: _showStorage,
                             onAbout: _showAbout,
                           ),
@@ -943,11 +1359,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               viewMode: view,
                               filterActive:
                                   _formatFilter != null ||
-                                  _readFilter != _ReadFilter.all,
+                                  _readFilter != _ReadFilter.all ||
+                                  _seriesFilter != null ||
+                                  _tagFilter != null ||
+                                  _favoritesOnly,
                               formatFilter: _formatFilter,
                               readFilter: _readFilter,
+                              seriesFilter: _seriesFilter,
+                              tagFilter: _tagFilter,
+                              favoritesOnly: _favoritesOnly,
                               onClearFormat: _clearFormatFilter,
                               onClearRead: _clearReadFilter,
+                              onClearSeries: _clearSeriesFilter,
+                              onClearTag: _clearTagFilter,
+                              onClearFavorites: _clearFavoritesFilter,
                             ),
                           ),
                         ),
@@ -1012,7 +1437,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       if (books.isEmpty)
                         SliverFillRemaining(
                           hasScrollBody: false,
-                          child: _EmptyLibrary(onImport: _pickAndImport),
+                          child: _EmptyLibrary(onImport: _showImportOptions),
                         )
                       else if (visible.isEmpty)
                         SliverFillRemaining(
@@ -1118,8 +1543,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 bottom: 24,
                 child: SafeArea(
                   child: FloatingActionButton.extended(
-                    onPressed: _importing ? null : _pickAndImport,
-                    icon: const Icon(Icons.add_rounded),
+                    onPressed: _importing ? null : _showImportOptions,
+                    icon: const IgnorePointer(child: Icon(Icons.add_rounded)),
                     label: const Text('导入'),
                   ),
                 ),
@@ -1151,9 +1576,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 cancelling: _cancelImport,
                 onCancel: _cancelRemainingImports,
               ),
+            if (_dragActive) const _DropOverlay(),
           ],
         ),
       ),
+    );
+    if (!_supportsDesktopDrop) return content;
+    return DropTarget(
+      enable: !_importing,
+      onDragEntered: (_) {
+        if (!mounted || _importing) return;
+        setState(() => _dragActive = true);
+      },
+      onDragExited: (_) {
+        if (mounted) setState(() => _dragActive = false);
+      },
+      onDragDone: (details) {
+        if (mounted) setState(() => _dragActive = false);
+        final paths = details.files
+            .map((file) => file.path)
+            .where((path) => path.isNotEmpty)
+            .toList();
+        unawaited(_importDropped(paths));
+      },
+      child: content,
     );
   }
 
@@ -1227,8 +1673,19 @@ class _LibraryBackground extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.onStorage, required this.onAbout});
+  const _Header({
+    required this.onImportFolder,
+    required this.onSeries,
+    required this.onStats,
+    required this.onBackup,
+    required this.onStorage,
+    required this.onAbout,
+  });
 
+  final VoidCallback onImportFolder;
+  final VoidCallback onSeries;
+  final VoidCallback onStats;
+  final VoidCallback onBackup;
   final VoidCallback onStorage;
   final VoidCallback onAbout;
 
@@ -1290,13 +1747,62 @@ class _Header extends StatelessWidget {
             color: AppColors.textSecondary,
           ),
           onSelected: (value) {
-            if (value == 'storage') {
-              onStorage();
-            } else {
-              onAbout();
+            switch (value) {
+              case 'importFolder':
+                onImportFolder();
+              case 'series':
+                onSeries();
+              case 'stats':
+                onStats();
+              case 'backup':
+                onBackup();
+              case 'storage':
+                onStorage();
+              case 'about':
+                onAbout();
             }
           },
           itemBuilder: (context) => const [
+            PopupMenuItem(
+              value: 'importFolder',
+              child: Row(
+                children: [
+                  Icon(Icons.create_new_folder_outlined, size: 19),
+                  SizedBox(width: 10),
+                  Text('导入文件夹'),
+                ],
+              ),
+            ),
+            PopupMenuItem(
+              value: 'series',
+              child: Row(
+                children: [
+                  Icon(Icons.collections_bookmark_outlined, size: 19),
+                  SizedBox(width: 10),
+                  Text('系列合集'),
+                ],
+              ),
+            ),
+            PopupMenuItem(
+              value: 'stats',
+              child: Row(
+                children: [
+                  Icon(Icons.insights_rounded, size: 19),
+                  SizedBox(width: 10),
+                  Text('阅读统计'),
+                ],
+              ),
+            ),
+            PopupMenuItem(
+              value: 'backup',
+              child: Row(
+                children: [
+                  Icon(Icons.backup_outlined, size: 19),
+                  SizedBox(width: 10),
+                  Text('备份与恢复'),
+                ],
+              ),
+            ),
             PopupMenuItem(
               value: 'storage',
               child: Row(
@@ -1336,8 +1842,14 @@ class _LibraryToolbar extends StatelessWidget {
     required this.filterActive,
     required this.formatFilter,
     required this.readFilter,
+    required this.seriesFilter,
+    required this.tagFilter,
+    required this.favoritesOnly,
     required this.onClearFormat,
     required this.onClearRead,
+    required this.onClearSeries,
+    required this.onClearTag,
+    required this.onClearFavorites,
   });
 
   final TextEditingController controller;
@@ -1350,13 +1862,23 @@ class _LibraryToolbar extends StatelessWidget {
   final bool filterActive;
   final ComicFormat? formatFilter;
   final _ReadFilter readFilter;
+  final String? seriesFilter;
+  final String? tagFilter;
+  final bool favoritesOnly;
   final VoidCallback onClearFormat;
   final VoidCallback onClearRead;
+  final VoidCallback onClearSeries;
+  final VoidCallback onClearTag;
+  final VoidCallback onClearFavorites;
 
   @override
   Widget build(BuildContext context) {
     final hasFilterChips =
-        formatFilter != null || readFilter != _ReadFilter.all;
+        formatFilter != null ||
+        readFilter != _ReadFilter.all ||
+        seriesFilter != null ||
+        tagFilter != null ||
+        favoritesOnly;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1427,6 +1949,15 @@ class _LibraryToolbar extends StatelessWidget {
                   label: readFilter.label,
                   onDeleted: onClearRead,
                 ),
+              if (favoritesOnly)
+                _ActiveFilterChip(label: '收藏', onDeleted: onClearFavorites),
+              if (seriesFilter != null)
+                _ActiveFilterChip(
+                  label: '系列：$seriesFilter',
+                  onDeleted: onClearSeries,
+                ),
+              if (tagFilter != null)
+                _ActiveFilterChip(label: '#$tagFilter', onDeleted: onClearTag),
             ],
           ),
         ],
@@ -1498,11 +2029,21 @@ class _LibraryFilterSheet extends StatefulWidget {
     required this.initialSort,
     required this.initialFormat,
     required this.initialReadFilter,
+    required this.initialSeries,
+    required this.initialTag,
+    required this.initialFavoritesOnly,
+    required this.seriesCounts,
+    required this.tagCounts,
   });
 
   final LibrarySort initialSort;
   final ComicFormat? initialFormat;
   final _ReadFilter initialReadFilter;
+  final String? initialSeries;
+  final String? initialTag;
+  final bool initialFavoritesOnly;
+  final Map<String, int> seriesCounts;
+  final Map<String, int> tagCounts;
 
   @override
   State<_LibraryFilterSheet> createState() => _LibraryFilterSheetState();
@@ -1512,6 +2053,9 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
   late LibrarySort _sort;
   late ComicFormat? _format;
   late _ReadFilter _readFilter;
+  late String? _series;
+  late String? _tag;
+  late bool _favoritesOnly;
 
   @override
   void initState() {
@@ -1519,6 +2063,9 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
     _sort = widget.initialSort;
     _format = widget.initialFormat;
     _readFilter = widget.initialReadFilter;
+    _series = widget.initialSeries;
+    _tag = widget.initialTag;
+    _favoritesOnly = widget.initialFavoritesOnly;
   }
 
   @override
@@ -1634,6 +2181,90 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
                     ),
                 ],
               ),
+              const SizedBox(height: 18),
+              const Text(
+                '收藏',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _FilterChoice(
+                    label: '全部',
+                    selected: !_favoritesOnly,
+                    onTap: () => setState(() => _favoritesOnly = false),
+                  ),
+                  _FilterChoice(
+                    label: '只看收藏',
+                    selected: _favoritesOnly,
+                    onTap: () => setState(() => _favoritesOnly = true),
+                  ),
+                ],
+              ),
+              if (widget.seriesCounts.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                const Text(
+                  '系列',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _FilterChoice(
+                      label: '全部系列',
+                      selected: _series == null,
+                      onTap: () => setState(() => _series = null),
+                    ),
+                    for (final entry in widget.seriesCounts.entries)
+                      _FilterChoice(
+                        label: '${entry.key} (${entry.value})',
+                        selected: _series == entry.key,
+                        onTap: () => setState(() => _series = entry.key),
+                      ),
+                  ],
+                ),
+              ],
+              if (widget.tagCounts.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                const Text(
+                  '标签',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _FilterChoice(
+                      label: '全部标签',
+                      selected: _tag == null,
+                      onTap: () => setState(() => _tag = null),
+                    ),
+                    for (final entry in widget.tagCounts.entries)
+                      _FilterChoice(
+                        label: '#${entry.key} (${entry.value})',
+                        selected: _tag == entry.key,
+                        onTap: () => setState(() => _tag = entry.key),
+                      ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 22),
               Row(
                 children: [
@@ -1642,6 +2273,9 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
                       _sort = LibrarySort.recentRead;
                       _format = null;
                       _readFilter = _ReadFilter.all;
+                      _series = null;
+                      _tag = null;
+                      _favoritesOnly = false;
                     }),
                     child: const Text('重置'),
                   ),
@@ -1652,6 +2286,9 @@ class _LibraryFilterSheetState extends State<_LibraryFilterSheet> {
                         sort: _sort,
                         format: _format,
                         readFilter: _readFilter,
+                        series: _series,
+                        tag: _tag,
+                        favoritesOnly: _favoritesOnly,
                       ),
                     ),
                     child: const Text('应用'),
@@ -1697,12 +2334,17 @@ class _FilterChoice extends StatelessWidget {
                   : Colors.white.withValues(alpha: 0.07),
             ),
           ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-              color: selected ? AppColors.accent : AppColors.textPrimary,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                color: selected ? AppColors.accent : AppColors.textPrimary,
+              ),
             ),
           ),
         ),
@@ -1961,12 +2603,36 @@ class _BookCard extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 9),
-            Text(
-              book.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium
-                  ?.copyWith(fontSize: 13.5, height: 1.2),
+            Row(
+              children: [
+                if (book.pinned)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 3),
+                    child: Icon(
+                      Icons.push_pin_rounded,
+                      size: 11,
+                      color: AppColors.accent,
+                    ),
+                  ),
+                if (book.favorite)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 3),
+                    child: Icon(
+                      Icons.star_rounded,
+                      size: 12,
+                      color: AppColors.accent,
+                    ),
+                  ),
+                Expanded(
+                  child: Text(
+                    book.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium
+                        ?.copyWith(fontSize: 13.5, height: 1.2),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 3),
             Text(
@@ -2039,6 +2705,24 @@ class _BookListItem extends StatelessWidget {
                   children: [
                     Row(
                       children: [
+                        if (book.pinned)
+                          const Padding(
+                            padding: EdgeInsets.only(right: 3),
+                            child: Icon(
+                              Icons.push_pin_rounded,
+                              size: 11,
+                              color: AppColors.accent,
+                            ),
+                          ),
+                        if (book.favorite)
+                          const Padding(
+                            padding: EdgeInsets.only(right: 3),
+                            child: Icon(
+                              Icons.star_rounded,
+                              size: 12,
+                              color: AppColors.accent,
+                            ),
+                          ),
                         Expanded(
                           child: Text(
                             book.title,
@@ -2457,6 +3141,69 @@ class _NoMatchingBooks extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DropOverlay extends StatelessWidget {
+  const _DropOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Container(
+          color: Colors.black.withValues(alpha: 0.72),
+          padding: const EdgeInsets.all(28),
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 34, vertical: 30),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: AppColors.accent.withValues(alpha: 0.5),
+                  width: 1.5,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.accentDeep.withValues(alpha: 0.16),
+                    blurRadius: 40,
+                    offset: const Offset(0, 12),
+                  ),
+                ],
+              ),
+              child: const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.file_download_outlined,
+                    size: 42,
+                    color: AppColors.accent,
+                  ),
+                  SizedBox(height: 14),
+                  Text(
+                    '松开以导入漫画',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  SizedBox(height: 6),
+                  Text(
+                    '支持 PDF / MOBI 文件或文件夹',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );

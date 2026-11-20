@@ -294,6 +294,7 @@ void main() {
         of: card,
         matching: find.byIcon(Icons.more_horiz_rounded),
       ),
+      warnIfMissed: false,
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
