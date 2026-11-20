@@ -12,6 +12,7 @@ import '../utils/format.dart';
 import 'bookmark_editor_dialog.dart';
 
 /// Bottom sheet with chapter TOC, bookmarks and lazy page thumbnails.
+/// 包含章节目录、书签和按需加载页面缩略图的底部面板。
 class ReaderNavigationSheet extends StatelessWidget {
   const ReaderNavigationSheet({
     required this.source,

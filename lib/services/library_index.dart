@@ -3,6 +3,9 @@ import '../models/comic_book.dart';
 /// Incremental in-memory index for fast bookshelf search, tag and series
 /// lookups. It is rebuilt from `library.json` on startup and updated on every
 /// mutation, avoiding repeated lower-casing of the whole shelf while typing.
+/// 用于快速书架搜索、标签与系列查询的增量内存索引。
+/// 启动时从 `library.json` 重建，每次变更时增量更新，避免输入时反复
+/// 对整个书架做小写转换。
 class LibraryIndex {
   final Map<String, String> _searchText = {};
   final Map<String, String?> _seriesOf = {};

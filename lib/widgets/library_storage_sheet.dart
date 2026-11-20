@@ -7,6 +7,7 @@ import '../theme/app_theme.dart';
 import '../utils/format.dart';
 
 /// Bottom sheet that summarises disk usage and reclaims cache/orphan files.
+/// 汇总磁盘占用并清理缓存 / 无引用文件的底部面板。
 class LibraryStorageSheet extends StatefulWidget {
   const LibraryStorageSheet({required this.repository, super.key});
 

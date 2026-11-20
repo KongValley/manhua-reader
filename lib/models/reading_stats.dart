@@ -1,9 +1,11 @@
 /// Daily reading activity used by the bookshelf statistics panel.
+/// 书架统计面板使用的每日阅读记录。
 class ReadingStats {
   ReadingStats({Map<String, int>? dailyPages})
     : dailyPages = dailyPages ?? <String, int>{};
 
   /// Pages read per local calendar day, keyed by `yyyy-MM-dd`.
+  /// 每个本地自然日阅读的页数，键为 `yyyy-MM-dd`。
   final Map<String, int> dailyPages;
 
   static const int maxDays = 730;
@@ -43,6 +45,7 @@ class ReadingStats {
   }
 
   /// Oldest-to-newest page counts for the last seven days.
+  /// 最近七天（从旧到新）的翻页数。
   List<int> lastSevenDays([DateTime? now]) {
     final today = _day(now ?? DateTime.now());
     return [
@@ -96,6 +99,7 @@ class ReadingStats {
 
   /// Merges a backup using per-day maxima so restoring the same backup twice
   /// does not double-count pages.
+  /// 按每日最大值合并备份，避免重复恢复同一备份时重复计数。
   void merge(ReadingStats other) {
     for (final entry in other.dailyPages.entries) {
       final existing = dailyPages[entry.key] ?? 0;

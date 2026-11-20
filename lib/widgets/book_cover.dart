@@ -6,6 +6,7 @@ import '../models/comic_book.dart';
 import '../theme/app_theme.dart';
 
 /// Gradient logo mark used in the library header.
+/// 书架页头使用的渐变 Logo 标识。
 class WarmLogo extends StatelessWidget {
   const WarmLogo({this.size = 46, super.key});
 
@@ -77,6 +78,7 @@ class FormatBadge extends StatelessWidget {
 }
 
 /// Book cover with a graceful fallback when the thumbnail is missing.
+/// 书籍封面：缩略图缺失时显示优雅的占位图。
 class BookCover extends StatelessWidget {
   const BookCover({
     required this.book,

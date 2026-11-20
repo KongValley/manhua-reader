@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/comic_book.dart';
+import '../models/library_folder.dart';
 import '../models/library_settings.dart';
 import '../services/folder_import.dart';
 import '../services/library_repository.dart';
@@ -18,19 +19,28 @@ import '../utils/format.dart';
 import '../widgets/backup_sheet.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/book_organization_dialog.dart';
+import '../widgets/folder_name_dialog.dart';
 import '../widgets/library_storage_sheet.dart';
 import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reading_stats_sheet.dart';
+import 'folder_screen.dart';
 import 'reader_screen.dart';
 import 'series_screen.dart';
 
 class _ImportCandidate {
-  const _ImportCandidate({required this.name, this.path, this.file, this.saf});
+  const _ImportCandidate({
+    required this.name,
+    this.path,
+    this.file,
+    this.saf,
+    this.folderId,
+  });
 
   final String name;
   final String? path;
   final PlatformFile? file;
   final SafFile? saf;
+  final String? folderId;
 }
 
 enum _ReadFilter {
@@ -411,10 +421,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (SafFolderService.isSupported) {
       String? uri;
       List<SafFile> files;
+      String folderName;
       try {
         uri = await SafFolderService.pickDirectory();
         if (uri == null) return;
         files = await SafFolderService.listBooks(uri);
+        folderName = await SafFolderService.directoryName(uri);
       } catch (error) {
         _toast('无法读取文件夹：$error');
         return;
@@ -424,9 +436,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _toast('文件夹里没有找到 PDF / MOBI');
         return;
       }
+      final folder = _repository.ensureFolder(folderName);
       await _runImportCandidates([
-        for (final file in files) _ImportCandidate(name: file.name, saf: file),
+        for (final file in files)
+          _ImportCandidate(name: file.name, saf: file, folderId: folder.id),
       ]);
+      await _removeFolderIfEmpty(folder);
       return;
     }
 
@@ -443,9 +458,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
 
+    final directory = Directory(uri.toFilePath());
     List<File> files;
     try {
-      files = await FolderImportScanner.scanFolder(Directory(uri.toFilePath()));
+      files = await FolderImportScanner.scanFolder(directory);
     } catch (error) {
       _toast('无法扫描文件夹：$error');
       return;
@@ -455,30 +471,73 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _toast('文件夹里没有找到 PDF / MOBI');
       return;
     }
+    final folderName = p.basename(directory.path).trim();
+    final folder = _repository.ensureFolder(
+      folderName.isEmpty ? '导入的文件夹' : folderName,
+    );
     await _runImportCandidates([
       for (final file in files)
-        _ImportCandidate(name: p.basename(file.path), path: file.path),
+        _ImportCandidate(
+          name: p.basename(file.path),
+          path: file.path,
+          folderId: folder.id,
+        ),
     ]);
+    await _removeFolderIfEmpty(folder);
+  }
+
+  Future<void> _removeFolderIfEmpty(LibraryFolder folder) async {
+    if (!mounted) return;
+    if ((_repository.folderCounts[folder.id] ?? 0) == 0) {
+      await _repository.deleteFolder(folder);
+    }
   }
 
   Future<void> _importDropped(List<String> paths) async {
     if (_importing || paths.isEmpty) return;
-    List<File> files;
+    final candidates = <_ImportCandidate>[];
+    final createdFolders = <LibraryFolder>[];
     try {
-      files = await FolderImportScanner.expandPaths(paths);
+      for (final path in paths) {
+        if (candidates.length >= FolderImportScanner.defaultMaxFiles) break;
+        final type = FileSystemEntity.typeSync(path, followLinks: false);
+        if (type == FileSystemEntityType.directory) {
+          final files = await FolderImportScanner.scanFolder(
+            Directory(path),
+            maxFiles: FolderImportScanner.defaultMaxFiles - candidates.length,
+          );
+          if (files.isEmpty) continue;
+          final name = p.basename(path).trim();
+          final folder = _repository.ensureFolder(
+            name.isEmpty ? '导入的文件夹' : name,
+          );
+          createdFolders.add(folder);
+          candidates.addAll([
+            for (final file in files)
+              _ImportCandidate(
+                name: p.basename(file.path),
+                path: file.path,
+                folderId: folder.id,
+              ),
+          ]);
+        } else if (type == FileSystemEntityType.file &&
+            FolderImportScanner.isImportableName(path)) {
+          candidates.add(_ImportCandidate(name: p.basename(path), path: path));
+        }
+      }
     } catch (error) {
       _toast('无法读取拖入的文件：$error');
       return;
     }
     if (!mounted) return;
-    if (files.isEmpty) {
+    if (candidates.isEmpty) {
       _toast('拖入的内容里没有 PDF / MOBI');
       return;
     }
-    await _runImportCandidates([
-      for (final file in files)
-        _ImportCandidate(name: p.basename(file.path), path: file.path),
-    ]);
+    await _runImportCandidates(candidates);
+    for (final folder in createdFolders) {
+      await _removeFolderIfEmpty(folder);
+    }
   }
 
   Future<void> _runImportCandidates(List<_ImportCandidate> candidates) async {
@@ -558,6 +617,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           book = await _repository.importFile(
             stagedPath,
             originalName: name,
+            folderId: candidate.folderId,
             onProgress: progress,
             pdfPasswordProvider: passwordProvider,
           );
@@ -567,6 +627,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             book = await _repository.importFile(
               path,
               originalName: name,
+              folderId: candidate.folderId,
               onProgress: progress,
               pdfPasswordProvider: passwordProvider,
             );
@@ -577,6 +638,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               originalName: name,
               stream: picked.readAsByteStream(),
               totalSize: totalSize,
+              folderId: candidate.folderId,
               onProgress: progress,
               pdfPasswordProvider: passwordProvider,
             );
@@ -585,6 +647,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           book = await _repository.importFile(
             candidate.path!,
             originalName: name,
+            folderId: candidate.folderId,
             onProgress: progress,
             pdfPasswordProvider: passwordProvider,
           );
@@ -1192,6 +1255,36 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  Future<void> _renameFolder(LibraryFolder folder) async {
+    final name = await showFolderNameDialog(context, initialName: folder.name);
+    if (!mounted || name == null) return;
+    final ok = _repository.renameFolder(folder, name);
+    _toast(ok ? '文件夹已重命名' : '文件夹名称已存在或没有变化');
+  }
+
+  Future<void> _deleteFolder(LibraryFolder folder) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除文件夹？'),
+        content: const Text('文件夹中的书籍会移回书架根目录，不会删除漫画文件、进度或书签。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除文件夹'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _repository.deleteFolder(folder);
+    if (mounted) _toast('文件夹已删除，书籍已移回书架');
+  }
+
   Future<void> _showSeries() async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -1274,11 +1367,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 目录、书签（名称/备注）、缩略图导航'),
               Text('· 双页模式、加密 PDF 解锁'),
               Text('· 搜索筛选、批量管理、系列与标签'),
-              Text('· 阅读统计、JSON / 完整备份'),
+              Text('· 文件夹导入与重命名、阅读统计、备份'),
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.2.0'),
+              Text('版本 1.3.0'),
             ],
           ),
         ),
@@ -1317,14 +1410,42 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 listenable: _repository,
                 builder: (context, _) {
                   final books = _repository.books;
-                  final visible = _visibleBooks(books);
+                  final allVisible = _visibleBooks(books);
+                  final folders = [..._repository.folders]
+                    ..sort(
+                      (a, b) =>
+                          a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+                    );
+                  final showFolderGroups =
+                      !_hasActiveFilters &&
+                      !_selectionMode &&
+                      folders.isNotEmpty;
+                  final visible = showFolderGroups
+                      ? allVisible
+                            .where(
+                              (book) =>
+                                  book.folderId == null ||
+                                  _repository.folderById(book.folderId) == null,
+                            )
+                            .toList()
+                      : allVisible;
+                  final folderBooks = <String, List<ComicBook>>{};
+                  for (final book in books) {
+                    final folderId = book.folderId;
+                    if (folderId == null) continue;
+                    folderBooks.putIfAbsent(folderId, () => []).add(book);
+                  }
+                  final folderBookCount = folderBooks.values.fold<int>(
+                    0,
+                    (sum, items) => sum + items.length,
+                  );
                   final lastRead = _repository.lastRead;
                   final view = _repository.librarySettings.view;
                   final showContinue =
                       lastRead != null && !_hasActiveFilters && !_selectionMode;
                   final countLabel = _hasActiveFilters
-                      ? '${visible.length} / ${books.length}'
-                      : '${books.length}';
+                      ? '${allVisible.length} / ${books.length}'
+                      : '${visible.length}';
                   final bottomPadding = _selectionMode ? 128.0 : 110.0;
 
                   return CustomScrollView(
@@ -1386,6 +1507,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             ),
                           ),
                         ),
+                      if (showFolderGroups)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                            child: _FolderSection(
+                              folders: folders,
+                              booksByFolder: folderBooks,
+                              totalBooks: folderBookCount,
+                              onOpen: (folder) => Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (context) => FolderScreen(
+                                    repository: _repository,
+                                    folderId: folder.id,
+                                  ),
+                                ),
+                              ),
+                              onRename: _renameFolder,
+                              onDelete: _deleteFolder,
+                            ),
+                          ),
+                        ),
                       SliverToBoxAdapter(
                         child: Padding(
                           padding: EdgeInsets.fromLTRB(
@@ -1439,11 +1581,49 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           hasScrollBody: false,
                           child: _EmptyLibrary(onImport: _showImportOptions),
                         )
-                      else if (visible.isEmpty)
+                      else if (visible.isEmpty && !showFolderGroups)
                         SliverFillRemaining(
                           hasScrollBody: false,
                           child: _NoMatchingBooks(
                             onClear: _clearSearchAndFilters,
+                          ),
+                        )
+                      else if (visible.isEmpty && showFolderGroups)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 14,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.035),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.06),
+                                ),
+                              ),
+                              child: const Row(
+                                children: [
+                                  Icon(
+                                    Icons.folder_open_outlined,
+                                    size: 18,
+                                    color: AppColors.textSecondary,
+                                  ),
+                                  SizedBox(width: 9),
+                                  Expanded(
+                                    child: Text(
+                                      '根目录暂无书籍，内容都在文件夹中。',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: AppColors.textSecondary,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         )
                       else if (view == LibraryViewMode.grid)
@@ -2346,6 +2526,229 @@ class _FilterChoice extends StatelessWidget {
                 color: selected ? AppColors.accent : AppColors.textPrimary,
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FolderSection extends StatelessWidget {
+  const _FolderSection({
+    required this.folders,
+    required this.booksByFolder,
+    required this.totalBooks,
+    required this.onOpen,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  final List<LibraryFolder> folders;
+  final Map<String, List<ComicBook>> booksByFolder;
+  final int totalBooks;
+  final ValueChanged<LibraryFolder> onOpen;
+  final ValueChanged<LibraryFolder> onRename;
+  final ValueChanged<LibraryFolder> onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.folder_rounded, size: 18, color: AppColors.accent),
+            const SizedBox(width: 7),
+            Text(
+              '文件夹',
+              style: Theme.of(context).textTheme.titleLarge
+                  ?.copyWith(fontSize: 18),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              '${folders.length} 个 · $totalBooks 本',
+              style: const TextStyle(
+                fontSize: 11,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 142,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            itemCount: folders.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 10),
+            itemBuilder: (context, index) {
+              final folder = folders[index];
+              return SizedBox(
+                width: 228,
+                child: _FolderCard(
+                  folder: folder,
+                  books: booksByFolder[folder.id] ?? const [],
+                  onOpen: () => onOpen(folder),
+                  onRename: () => onRename(folder),
+                  onDelete: () => onDelete(folder),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FolderCard extends StatelessWidget {
+  const _FolderCard({
+    required this.folder,
+    required this.books,
+    required this.onOpen,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  final LibraryFolder folder;
+  final List<ComicBook> books;
+  final VoidCallback onOpen;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final average = books.isEmpty
+        ? 0.0
+        : books.fold<double>(0, (sum, book) => sum + book.progress) /
+              books.length;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onOpen,
+        borderRadius: BorderRadius.circular(18),
+        child: Ink(
+          padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF2A2230), Color(0xFF17151B)],
+            ),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: AppColors.accent.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.folder_rounded,
+                      size: 20,
+                      color: AppColors.accent,
+                    ),
+                  ),
+                  const Spacer(),
+                  PopupMenuButton<String>(
+                    tooltip: '文件夹操作',
+                    icon: const Icon(
+                      Icons.more_horiz_rounded,
+                      size: 19,
+                      color: AppColors.textSecondary,
+                    ),
+                    onSelected: (value) {
+                      if (value == 'rename') {
+                        onRename();
+                      } else if (value == 'delete') {
+                        onDelete();
+                      }
+                    },
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(
+                        value: 'rename',
+                        child: Row(
+                          children: [
+                            Icon(Icons.edit_outlined, size: 18),
+                            SizedBox(width: 9),
+                            Text('重命名文件夹'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.folder_delete_outlined,
+                              size: 18,
+                              color: Color(0xFFE57373),
+                            ),
+                            SizedBox(width: 9),
+                            Text(
+                              '删除文件夹',
+                              style: TextStyle(color: Color(0xFFE57373)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                folder.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium
+                    ?.copyWith(fontSize: 14),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                '${books.length} 本',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 7),
+              Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        value: average,
+                        minHeight: 3,
+                        backgroundColor: Colors.white.withValues(alpha: 0.08),
+                        valueColor: const AlwaysStoppedAnimation(
+                          AppColors.accent,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${(average * 100).round()}%',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),

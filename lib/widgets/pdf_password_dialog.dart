@@ -6,6 +6,10 @@ import '../theme/app_theme.dart';
 ///
 /// Returns the entered password, or null if the user cancels. Pass [errorText]
 /// when reopening the dialog after a failed attempt.
+/// 为加密 PDF 显示密码输入对话框。
+///
+/// 返回用户输入的密码；取消时返回 null。密码错误后重新打开对话框时
+/// 传入 [errorText] 显示错误提示。
 Future<String?> showPdfPasswordDialog(
   BuildContext context, {
   required String fileName,

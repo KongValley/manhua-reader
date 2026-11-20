@@ -1,4 +1,5 @@
 /// A reader-created bookmark at a specific page.
+/// 阅读器在指定页创建的书签。
 class Bookmark {
   Bookmark({
     required this.page,
@@ -8,13 +9,16 @@ class Bookmark {
   });
 
   /// Zero-based page index.
+  /// 零基页码。
   final int page;
   final DateTime createdAt;
 
   /// Optional user-provided name. Falls back to "第 N 页".
+  /// 用户可选名称；留空时回退为“第 N 页”。
   final String? label;
 
   /// Optional free-form note shown in the bookmarks panel.
+  /// 在书签面板显示的可选备注。
   final String? note;
 
   String get title {

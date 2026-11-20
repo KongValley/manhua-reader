@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// Warm, low-glare palette for long reading sessions.
+/// 适合长时间阅读的暖色低眩光配色。
 class AppColors {
   static const background = Color(0xFF090A0D);
   static const backgroundSoft = Color(0xFF0F1116);

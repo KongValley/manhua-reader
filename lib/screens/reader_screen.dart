@@ -594,6 +594,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _source = null;
     if (source != null) {
       // Let the page widgets finish tearing down before releasing PDFium.
+      // 先让页面组件完成卸载，再释放 PDFium。
       unawaited(
         Future<void>.delayed(
           Duration.zero,

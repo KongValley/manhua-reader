@@ -17,6 +17,11 @@ import 'services/pdf_password_cache.dart';
 /// Usage (Windows):
 ///   flutter build windows --debug -t lib/main_demo.dart
 ///   manhua_reader.exe --open=pdf --mode=horizontal
+/// 本地验证与截图使用的调试 / 演示入口。
+///
+/// Windows 用法：
+///   flutter build windows --debug -t lib/main_demo.dart
+///   manhua_reader.exe --open=pdf --mode=horizontal
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
   await pdfrxFlutterInitialize();
@@ -62,6 +67,7 @@ Future<void> main(List<String> args) async {
         await repository.importFile(
           sample.path,
           // This fixture is only used for password-flow verification.
+          // 该测试样本仅用于验证密码流程。
           pdfPasswordProvider: () async => 'manhua123',
         );
         debugPrint('demo: imported encrypted sample');
@@ -128,6 +134,7 @@ Future<void> main(List<String> args) async {
 
 /// Pushes the reader onto the library route, mirroring the real navigation
 /// stack so that the back button and dispose behavior can be verified.
+/// 把阅读器压入书架路由，模拟真实导航栈，以验证返回键与资源释放行为。
 class _DemoReaderLauncher extends StatefulWidget {
   const _DemoReaderLauncher({required this.book, required this.repository});
 

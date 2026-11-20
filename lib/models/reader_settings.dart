@@ -15,6 +15,7 @@ enum ReadingMode {
 }
 
 /// Reader preferences, persisted together with the library.
+/// 阅读器偏好设置，与书架一起持久化。
 class ReaderSettings {
   ReaderSettings({
     this.mode = ReadingMode.horizontal,
@@ -26,6 +27,7 @@ class ReaderSettings {
   bool rightToLeft;
 
   /// Show two pages side by side in horizontal mode.
+  /// 横向模式下并排显示两页。
   bool doublePage;
 
   Map<String, Object?> toJson() => {

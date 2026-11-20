@@ -5,10 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 /// Generates small PNG cover thumbnails for the library grid.
+/// 为书架网格生成小型 PNG 封面缩略图。
 class CoverGenerator {
   static const int _coverWidth = 520;
 
   /// Downscales an embedded image (used for MOBI pages) into [outputPath].
+  /// 将内嵌图片（用于 MOBI 页面）缩小并写入 [outputPath]。
   static Future<String?> fromImageBytes(
     Uint8List bytes,
     String outputPath,
@@ -36,6 +38,7 @@ class CoverGenerator {
   }
 
   /// Renders page 1 of [document] into [outputPath].
+  /// 将 [document] 的第 1 页渲染到 [outputPath]。
   static Future<String?> fromPdf(
     PdfDocument document,
     String outputPath,

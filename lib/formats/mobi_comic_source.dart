@@ -9,6 +9,7 @@ import 'comic_source.dart';
 import 'mobi/mobi_book.dart';
 
 /// MOBI comics: every page is one embedded image record.
+/// MOBI 漫画：每一页对应一条内嵌图片记录。
 class MobiComicSource implements ComicSource {
   MobiComicSource(this.book);
 
@@ -50,6 +51,7 @@ class MobiComicSource implements ComicSource {
 
 /// Loads and decodes one page image lazily, releasing the decoded bitmap when
 /// the page scrolls out of the widget tree.
+/// 按需加载并解码单个页面图片，页面滚出组件树时释放已解码位图。
 class MobiPageImage extends StatefulWidget {
   const MobiPageImage({
     required this.book,
@@ -63,9 +65,11 @@ class MobiPageImage extends StatefulWidget {
   final int pageIndex;
 
   /// Decode width override (used for small thumbnails).
+  /// 解码宽度覆盖值（用于小尺寸缩略图）。
   final int? targetWidth;
 
   /// Compact mode hides loading/error text for tiny navigation thumbnails.
+  /// 紧凑模式会在微型导航缩略图中隐藏加载 / 错误文字。
   final bool compact;
 
   @override

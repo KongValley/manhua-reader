@@ -16,6 +16,7 @@ void main() {
       expect(book.toc, isEmpty);
 
       // The color cover comes from EXTH and is not part of the HTML sequence.
+      // 彩色封面来自 EXTH，不属于 HTML 阅读顺序。
       final cover = book.images.first;
       expect(cover.recordIndex, 111);
       expect(cover.length, 807199);
@@ -26,6 +27,8 @@ void main() {
 
       // The HTML references pages out of physical record order:
       // recindex 47 -> record 53, recindex 61 -> record 67, ...
+      // HTML 引用的页面与物理记录顺序不同：
+      // recindex 47 -> 记录 53，recindex 61 -> 记录 67，……
       expect(book.images.take(3).map((image) => image.recordIndex).toList(), [
         111,
         53,

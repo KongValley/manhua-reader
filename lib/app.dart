@@ -26,6 +26,7 @@ class ManhuaApp extends StatelessWidget {
 
 /// Allows mouse dragging on desktop so the reader feels natural on tablets
 /// connected to a mouse / trackpad as well.
+/// 允许桌面端鼠标拖动，让连接鼠标 / 触控板的平板也有自然的阅读操作。
 class AppScrollBehavior extends MaterialScrollBehavior {
   const AppScrollBehavior();
 

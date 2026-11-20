@@ -11,6 +11,7 @@ import 'package:pdfrx/pdfrx.dart';
 import '../formats/mobi/mobi_book.dart';
 import '../models/bookmark.dart';
 import '../models/comic_book.dart';
+import '../models/library_folder.dart';
 import '../models/library_settings.dart';
 import '../models/library_storage_report.dart';
 import '../models/reader_settings.dart';
@@ -33,12 +34,14 @@ class ImportException implements Exception {
 typedef ImportProgressCallback = void Function(String label, double progress);
 
 /// Owns the bookshelf, import pipeline, covers and reading progress.
+/// 负责书架状态、导入流水线、封面与阅读进度。
 class LibraryRepository extends ChangeNotifier {
   LibraryRepository(this.paths);
 
   final AppPaths paths;
 
   final List<ComicBook> _books = [];
+  final List<LibraryFolder> _folders = [];
   ReaderSettings settings = ReaderSettings();
   LibrarySettings librarySettings = LibrarySettings();
   ReadingStats stats = ReadingStats();
@@ -61,8 +64,31 @@ class LibraryRepository extends ChangeNotifier {
   Map<String, int> get seriesCounts => _index.seriesCounts;
   Map<String, int> get tagCounts => _index.tagCounts;
 
-  bool matchesSearch(ComicBook book, String query) =>
-      _index.matches(book, query);
+  bool matchesSearch(ComicBook book, String query) {
+    if (_index.matches(book, query)) return true;
+    final folderName = folderById(book.folderId)?.name.toLowerCase();
+    return folderName != null && folderName.contains(query);
+  }
+
+  List<LibraryFolder> get folders => List<LibraryFolder>.unmodifiable(_folders);
+
+  LibraryFolder? folderById(String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final folder in _folders) {
+      if (folder.id == id) return folder;
+    }
+    return null;
+  }
+
+  Map<String, int> get folderCounts {
+    final counts = {for (final folder in _folders) folder.id: 0};
+    for (final book in _books) {
+      final id = book.folderId;
+      if (id == null) continue;
+      if (counts.containsKey(id)) counts[id] = counts[id]! + 1;
+    }
+    return counts;
+  }
 
   ComicBook? get lastRead {
     ComicBook? latest;
@@ -103,6 +129,23 @@ class LibraryRepository extends ChangeNotifier {
                     ),
               );
           }
+          final foldersJson = decoded['folders'];
+          _folders.clear();
+          if (foldersJson is List) {
+            _folders.addAll(
+              foldersJson
+                  .whereType<Map>()
+                  .map(
+                    (json) => LibraryFolder.fromJson(
+                      json.map((key, value) => MapEntry('$key', value)),
+                    ),
+                  )
+                  .where(
+                    (folder) =>
+                        folder.id.isNotEmpty && folder.name.trim().isNotEmpty,
+                  ),
+            );
+          }
           settings = ReaderSettings.fromJson(
             decoded['settings'] is Map
                 ? (decoded['settings'] as Map).map(
@@ -133,6 +176,8 @@ class LibraryRepository extends ChangeNotifier {
     if (loadedVersion < 3) {
       // Version 3 introduces series/tag organization. Derive a series hint
       // from titles such as "VOL.001" or "海贼王 第12卷" once during migration.
+      // 版本 3 引入系列/标签组织。迁移时从 "VOL.001" 或 "海贼王 第12卷"
+      // 这类标题中推导一次系列提示。
       for (final book in _books) {
         book.series ??= deriveSeriesName(book.title, book.originalName);
       }
@@ -141,6 +186,8 @@ class LibraryRepository extends ChangeNotifier {
     for (final book in _books) {
       // iOS can move the app container between launches. Fall back to the
       // current app directories when an absolute path is stale.
+      // iOS 可能在两次启动之间移动应用容器；绝对路径失效时回退到当前
+      // 应用目录。
       if (!File(book.filePath).existsSync()) {
         final candidate = File(
           p.join(paths.booksDir.path, p.basename(book.filePath)),
@@ -155,6 +202,12 @@ class LibraryRepository extends ChangeNotifier {
         book.coverPath = candidate.existsSync() ? candidate.path : null;
       }
     }
+    final folderIds = {for (final folder in _folders) folder.id};
+    for (final book in _books) {
+      if (book.folderId != null && !folderIds.contains(book.folderId)) {
+        book.folderId = null;
+      }
+    }
     _index.rebuild(_books);
     _sortBooks();
     _saved = true;
@@ -164,6 +217,7 @@ class LibraryRepository extends ChangeNotifier {
   Future<ComicBook> importFile(
     String sourcePath, {
     String? originalName,
+    String? folderId,
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
   }) async {
@@ -198,6 +252,7 @@ class LibraryRepository extends ChangeNotifier {
         format: format,
         originalName: name,
         id: id,
+        folderId: folderId,
         onProgress: onProgress,
         pdfPasswordProvider: pdfPasswordProvider,
       );
@@ -213,10 +268,13 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Imports a file exposed by a platform picker (Android SAF content URIs
   /// cannot always be represented by a local path).
+  /// 导入平台文件选择器提供的文件（Android SAF content URI 不一定能表示为
+  /// 本地路径）。
   Future<ComicBook> importStream({
     required String originalName,
     required Stream<List<int>> stream,
     int? totalSize,
+    String? folderId,
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
   }) async {
@@ -263,6 +321,7 @@ class LibraryRepository extends ChangeNotifier {
         format: format,
         originalName: originalName,
         id: id,
+        folderId: folderId,
         onProgress: onProgress,
         pdfPasswordProvider: pdfPasswordProvider,
       );
@@ -281,6 +340,7 @@ class LibraryRepository extends ChangeNotifier {
     required ComicFormat format,
     required String originalName,
     required String id,
+    String? folderId,
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
   }) async {
@@ -308,6 +368,7 @@ class LibraryRepository extends ChangeNotifier {
         addedAt: DateTime.now(),
         coverPath: coverPath,
         series: deriveSeriesName(info.title, originalName),
+        folderId: folderId,
       );
 
       _books.insert(0, book);
@@ -387,6 +448,7 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Replaces a missing (or broken) file for an existing bookshelf entry while
   /// keeping its id, title, progress and bookmarks.
+  /// 为已有书架条目替换丢失（或损坏）的文件，同时保留 id、标题、进度和书签。
   Future<ComicBook> relinkFile(
     ComicBook book,
     String sourcePath, {
@@ -464,6 +526,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Rebuilds a cover in a new file so Flutter's image cache sees the change.
+  /// 在新文件中重建封面，使 Flutter 图片缓存能够感知变化。
   Future<bool> regenerateCover(
     ComicBook book, {
     ImportProgressCallback? onProgress,
@@ -512,6 +575,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Replaces the cover with a user-picked image, normalised to a 520px PNG.
+  /// 用用户选择的图片替换封面，并规范化为 520px PNG。
   Future<bool> setCustomCover(ComicBook book, Uint8List bytes) async {
     if (bytes.isEmpty) return false;
     final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -575,6 +639,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Deletes unreferenced files and the app cache. Returns bytes reclaimed.
+  /// 删除未被引用的文件与应用缓存，返回回收的字节数。
   Future<int> cleanupStorage() async {
     final bookPaths = {for (final book in _books) _pathKey(book.filePath)};
     final coverPaths = {
@@ -604,6 +669,8 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Exports shelf metadata, bookmarks, organization and statistics as JSON.
   /// File paths are relative; the JSON alone does not include comic bytes.
+  /// 以 JSON 导出书架元数据、书签、组织信息与统计。
+  /// 文件路径为相对路径；仅 JSON 不包含漫画文件字节。
   Uint8List exportBackupJson() {
     final manifest = _buildBackupManifest(includeFiles: false);
     return Uint8List.fromList(
@@ -612,6 +679,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Builds a ZIP backup containing `manifest.json`, books and covers.
+  /// 构建包含 `manifest.json`、漫画文件与封面的 ZIP 备份。
   Future<File> createBackupArchive({ImportProgressCallback? onProgress}) async {
     await paths.cacheDir.create(recursive: true);
     final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -667,6 +735,7 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Restores a JSON manifest or a ZIP backup. Existing books are kept and
   /// duplicates are skipped; statistics are merged by per-day maxima.
+  /// 恢复 JSON 清单或 ZIP 备份。保留已有书籍并跳过重复项；统计按每日最大值合并。
   Future<BackupImportResult> restoreBackupBytes(
     Uint8List bytes, {
     ImportProgressCallback? onProgress,
@@ -707,6 +776,26 @@ class LibraryRepository extends ChangeNotifier {
             )
           : null,
     );
+    final folderIdMap = <String, String>{};
+    final rawFolders = manifest['folders'];
+    if (rawFolders is List) {
+      for (final item in rawFolders) {
+        if (item is! Map) continue;
+        final backupId = '${item['id'] ?? ''}';
+        final cleanName = _cleanFolderName('${item['name'] ?? ''}');
+        if (backupId.isEmpty || cleanName == null) continue;
+        LibraryFolder? local;
+        for (final folder in _folders) {
+          if (folder.name.toLowerCase() == cleanName.toLowerCase()) {
+            local = folder;
+            break;
+          }
+        }
+        local ??= LibraryFolder(id: _newId(), name: cleanName);
+        if (!_folders.contains(local)) _folders.add(local);
+        folderIdMap[backupId] = local.id;
+      }
+    }
 
     final total = max(1, rawBooks.length);
     for (var index = 0; index < rawBooks.length; index++) {
@@ -783,6 +872,7 @@ class LibraryRepository extends ChangeNotifier {
         map['id'] = id;
         map['filePath'] = destination.path;
         map['coverPath'] = coverPath;
+        map['folderId'] = folderIdMap['${map['folderId'] ?? ''}'];
         final book = ComicBook.fromJson(map);
         if (hasFile) {
           book.fileSize = await destination.length();
@@ -849,6 +939,7 @@ class LibraryRepository extends ChangeNotifier {
       'settings': settings.toJson(),
       'library': librarySettings.toJson(),
       'stats': stats.toJson(),
+      'folders': _folders.map((folder) => folder.toJson()).toList(),
       'books': books,
       'fileList': fileList,
     };
@@ -929,6 +1020,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Marks every given book as finished. Returns how many changed.
+  /// 将给定书籍全部标记为已读完，返回实际发生变化的数量。
   int markBooksRead(Iterable<ComicBook> books) {
     final now = DateTime.now();
     var changed = 0;
@@ -965,6 +1057,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Adds or updates a bookmark with a custom name and note.
+  /// 添加或更新带自定义名称与备注的书签。
   void setBookmark(
     ComicBook book,
     int page, {
@@ -1085,6 +1178,7 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   /// Updates the user-managed series and tags for one book.
+  /// 更新单本书的用户自定义系列与标签。
   void setBookOrganization(
     ComicBook book, {
     required String? series,
@@ -1100,6 +1194,60 @@ class LibraryRepository extends ChangeNotifier {
     _index.upsert(book);
     notifyListeners();
     _scheduleSave();
+  }
+
+  /// Returns an existing folder with [name] (case-insensitive) or creates one.
+  /// 返回已有的同名文件夹（大小写不敏感），不存在时创建。
+  LibraryFolder ensureFolder(String name) {
+    final clean = _cleanFolderName(name) ?? '文件夹';
+    final key = clean.toLowerCase();
+    for (final folder in _folders) {
+      if (folder.name.toLowerCase() == key) return folder;
+    }
+    final folder = LibraryFolder(id: _newId(), name: clean);
+    _folders.add(folder);
+    notifyListeners();
+    _scheduleSave();
+    return folder;
+  }
+
+  /// Renames a shelf folder. Returns false for an empty/duplicate name.
+  /// 重命名书架文件夹；名称为空或重复时返回 false。
+  bool renameFolder(LibraryFolder folder, String name) {
+    final clean = _cleanFolderName(name);
+    if (clean == null || clean == folder.name) return false;
+    final key = clean.toLowerCase();
+    if (_folders.any(
+      (item) => item.id != folder.id && item.name.toLowerCase() == key,
+    )) {
+      return false;
+    }
+    folder.name = clean;
+    notifyListeners();
+    _scheduleSave();
+    return true;
+  }
+
+  /// Removes a folder but keeps its books on the shelf root by default.
+  /// 删除文件夹，默认把其中的书籍保留在书架根目录。
+  Future<void> deleteFolder(
+    LibraryFolder folder, {
+    bool keepBooks = true,
+  }) async {
+    if (!_folders.remove(folder)) return;
+    final affected = _books
+        .where((book) => book.folderId == folder.id)
+        .toList();
+    if (keepBooks) {
+      for (final book in affected) {
+        book.folderId = null;
+      }
+    }
+    notifyListeners();
+    await _saveNow();
+    if (!keepBooks && affected.isNotEmpty) {
+      await deleteBooks(affected);
+    }
   }
 
   Future<void> flush() async {
@@ -1148,10 +1296,11 @@ class LibraryRepository extends ChangeNotifier {
         _dirty = false;
         _sortBooks();
         final payload = jsonEncode({
-          'version': 3,
+          'version': 4,
           'settings': settings.toJson(),
           'library': librarySettings.toJson(),
           'stats': stats.toJson(),
+          'folders': _folders.map((folder) => folder.toJson()).toList(),
           'books': _books.map((book) => book.toJson()).toList(),
         });
         final temp = File('${paths.libraryFile.path}.tmp');
@@ -1266,6 +1415,12 @@ class LibraryRepository extends ChangeNotifier {
       if (tags.length >= 20) break;
     }
     return tags;
+  }
+
+  String? _cleanFolderName(String? value) {
+    final text = value?.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text == null || text.isEmpty) return null;
+    return text.length <= 60 ? text : text.substring(0, 60);
   }
 
   String? _cleanBookmarkText(String? value, int maxLength) {

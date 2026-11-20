@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 /// Formats a byte count for human readers.
+/// 将字节数格式化为便于阅读的文本。
 String formatFileSize(int bytes) {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -27,6 +28,7 @@ String formatPageCount(int count) {
 }
 
 /// Relative day labels for the library.
+/// 书架使用的相对日期标签。
 String formatActivity(DateTime? date) {
   if (date == null) return '尚未阅读';
   final now = DateTime.now();
@@ -55,6 +57,7 @@ String formatBookmarkTime(DateTime date) {
 }
 
 /// Clamps a page to a valid index for [pageCount].
+/// 将页码限制在 [pageCount] 对应的有效索引范围内。
 int clampPage(int page, int pageCount) {
   if (pageCount <= 0) return 0;
   return math.max(0, math.min(page, pageCount - 1));

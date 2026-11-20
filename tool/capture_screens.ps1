@@ -99,6 +99,7 @@ try {
 
   # Only move and pin on top; the initial size is supplied through the
   # MANHUA_WINDOW_* environment variables at window creation time.
+  # 只移动并置顶窗口；初始尺寸由窗口创建时的 MANHUA_WINDOW_* 环境变量提供。
   [ManhuaShot]::SetWindowPos($hwnd, [IntPtr](-1), 20, 20, 0, 0, 0x0041) | Out-Null
   [ManhuaShot]::BringWindowToTop($hwnd) | Out-Null
   [ManhuaShot]::SetForegroundWindow($hwnd) | Out-Null
@@ -146,12 +147,15 @@ try {
   if ($SendText -ne "") {
     # Re-assert topmost/foreground immediately before typing: another topmost
     # window may have taken focus while the password dialog was loading.
+    # 输入前再次置顶/前置窗口：密码框加载期间可能有其他置顶窗口抢走焦点。
     [ManhuaShot]::SetWindowPos($hwnd, [IntPtr](-1), 20, 20, 0, 0, 0x0041) | Out-Null
     [ManhuaShot]::BringWindowToTop($hwnd) | Out-Null
     [ManhuaShot]::SetForegroundWindow($hwnd) | Out-Null
     Start-Sleep -Milliseconds 500
     # The password dialog's field is centered around 53% of the reader height;
     # clicking it also makes sure the app window has keyboard focus.
+    # 密码框输入区域大约位于阅读器高度的 53% 处；点击它也能确保应用窗口
+    # 获得键盘焦点。
     Click-At 0.5 0.53
     Start-Sleep -Milliseconds 500
     [System.Windows.Forms.SendKeys]::SendWait($SendText)
@@ -161,6 +165,8 @@ try {
   if ($ShowChrome) {
     # Two taps five seconds apart leave the chrome visible regardless of its
     # initial state (the reader auto-hides after four seconds).
+    # 间隔五秒点两次，无论初始状态如何都能让工具栏保持可见
+    # （阅读器四秒后会自动隐藏）。
     Click-At 0.5 0.5
     Start-Sleep -Seconds 5
     Click-At 0.5 0.5

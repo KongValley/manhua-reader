@@ -2,6 +2,10 @@
 ///
 /// The first page is shown alone (typically the cover), then pages are paired
 /// as (1, 2), (3, 4), ... — the convention used by most book readers.
+/// 双页阅读器使用的跨页配对规则。
+///
+/// 第一页单独显示（通常是封面），之后按 (1, 2)、(3, 4)…… 两页一组，
+/// 与大多数书籍阅读器的习惯一致。
 List<List<int>> buildSpreads(int pageCount) {
   if (pageCount <= 0) return const [];
   final spreads = <List<int>>[
@@ -21,6 +25,7 @@ List<List<int>> buildSpreads(int pageCount) {
 }
 
 /// Returns the spread index that contains [page].
+/// 返回包含 [page] 的跨页索引。
 int spreadIndexForPage(List<List<int>> spreads, int page) {
   for (var i = 0; i < spreads.length; i++) {
     final spread = spreads[i];

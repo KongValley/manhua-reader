@@ -1,9 +1,9 @@
 # 漫阅书架功能开发方案
 
-> 版本：v1.2 · 2026-11-21  
+> 版本：v1.3 · 2026-11-21  
 > 适用项目：`manhua_reader`（Flutter / Android / iOS / Windows）  
-> 状态：P0 基线已在现有代码中落地；P1 已于 2026-11-20 完成；P2 功能已完成（SQLite 迁移按规模条件保留）。  
-> 关联代码：`lib/screens/library_screen.dart`、`lib/screens/series_screen.dart`、`lib/services/library_repository.dart`、`lib/services/library_index.dart`、`lib/services/folder_import.dart`、`lib/services/saf_folder_service.dart`、`lib/models/comic_book.dart`、`lib/models/reading_stats.dart`、`lib/models/library_settings.dart`、`lib/widgets/reading_stats_sheet.dart`、`lib/widgets/backup_sheet.dart`、`lib/widgets/book_organization_dialog.dart`
+> 状态：P0 基线已在现有代码中落地；P1 已于 2026-11-20 完成；P2 功能已完成；P2+ 书架文件夹已补充（SQLite 迁移按规模条件保留）。  
+> 关联代码：`lib/screens/library_screen.dart`、`lib/screens/folder_screen.dart`、`lib/screens/series_screen.dart`、`lib/services/library_repository.dart`、`lib/services/library_index.dart`、`lib/services/folder_import.dart`、`lib/services/saf_folder_service.dart`、`lib/models/comic_book.dart`、`lib/models/library_folder.dart`、`lib/models/reading_stats.dart`、`lib/widgets/folder_name_dialog.dart`
 
 ---
 
@@ -105,7 +105,7 @@
 
 实现备注：
 
-- 搜索、排序、筛选与视图偏好：`LibrarySettings` / `library.json`（P1 为 `version: 2`，P2 升至 `version: 3`）持久化视图与排序；搜索与筛选条件不跨会话保存，避免下次启动出现“空书架”的误解。
+- 搜索、排序、筛选与视图偏好：`LibrarySettings` / `library.json`（P1 为 `version: 2`，P2 升至 `version: 3`，文件夹功能升至 `version: 4`）持久化视图与排序；搜索与筛选条件不跨会话保存，避免下次启动出现“空书架”的误解。
 - 多选栏位于底部，提供退出、全选/取消全选、标记已读与删除；删除走二次确认，标记已读会写入 `lastPage = pageCount - 1` 与 `lastReadAt`。
 - 重定位使用 `${id}_r<timestamp>.<ext>` 新副本，成功后才删除旧文件；封面重建使用 `${id}_c<timestamp>.png`，避免图片缓存命中旧图。
 - 存储管理按实际目录扫描 `books/`、`covers/`、`cache/`，区分书架引用、缓存与无引用文件；清理不会删除书架中的有效文件。
@@ -120,13 +120,30 @@
 - 备份与恢复：JSON 清单（不含漫画文件）与完整 `.mrbackup` ZIP（含文件/封面）；恢复合并书架、跳过重复、缺失文件标记可重定位、统计按日最大值合并。
 - 自定义封面与系列合并展示：`setCustomCover()` 从本地图片生成 520px PNG；`customCover` 随书保存；重新生成封面恢复自动封面。
 - 增量索引：`LibraryIndex` 在启动时构建、在导入/删除/重命名/组织编辑时增量更新，搜索覆盖书名 / 原名 / 系列 / 标签。SQLite/Isar 迁移仍按方案保留为「书架超过约 1000 本」时再实施。
-- 数据 schema 升至 `version: 3`；v2 数据加载时自动补齐系列提示与默认组织字段。
+- 数据 schema 升至 `version: 4`；v2/v3 数据加载时自动补齐系列提示、组织字段与空文件夹列表。
 
 实现备注：
 
 - P2 新增 20 个测试（统计 / 系列推导 / 索引 / 文件夹扫描 / 仓储 / UI / 拖拽覆盖层），测试总数 61，`flutter analyze` 无告警。
 - Android SAF 原生代码因当前环境无 Android SDK / 设备，未编译与真机验证；桌面 Windows Release 已构建并做面板/系列/统计/备份截图验收。
 - 完整 ZIP 备份在内存中读取后交给系统保存；超大书架建议使用 JSON 或分批备份。
+
+### 3.4 P2+：书架文件夹（已完成 2026-11-21）
+
+| 能力 | 说明 |
+| --- | --- |
+| 文件夹导入 | 选择目录后创建 / 复用同名 `LibraryFolder`，递归扫描到的 PDF/MOBI 统一归入该文件夹；桌面拖入的每个顶层目录各建一个文件夹。 |
+| 文件夹展示 | 主页新增横向文件夹卡片：名称、书籍数、平均进度；文件夹内书籍不再重复出现在根目录网格。 |
+| 重命名 | 书架文件夹卡片的「文件夹操作」菜单和文件夹页 AppBar 都可重命名；名称大小写不敏感去重，最长 60 字。 |
+| 删除 | 删除文件夹时把 `folderId` 置空，书籍回到根目录，不删除文件 / 进度 / 书签。 |
+| 搜索 | 搜索 / 筛选激活时隐藏文件夹卡片，跨文件夹平铺匹配书籍。 |
+| 备份 | `folders` 与 `ComicBook.folderId` 进入 JSON/ZIP 清单；恢复时按名称复用本地文件夹并重映射 id。 |
+| 数据库 | `library.json` schema v4 增加 `folders` 数组与 `folderId` 字段；v3 数据无文件夹时正常迁移。 |
+
+实现备注：
+
+- 文件夹层级只保留**所选顶层目录**；内部子目录递归合并到同一文件夹，不建立嵌套树。
+- 新增 8 个测试（文件夹仓储 / 文件夹 UI / 文件夹备份 / v4 迁移 / 文件夹导入），测试总数 69。
 
 ---
 
@@ -248,11 +265,11 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 
 ### 5.3 数据模型
 
-`library.json` 结构（P2 为 `version: 3`）：
+`library.json` 结构（当前为 `version: 4`）：
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "settings": {
     "mode": "horizontal",
     "rightToLeft": false,
@@ -267,6 +284,13 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
       "2026-11-20": 42
     }
   },
+  "folders": [
+    {
+      "id": "folder-a",
+      "name": "合集A",
+      "createdAt": "2026-11-21T00:00:00.000"
+    }
+  ],
   "books": [
     {
       "id": "m3k2x9abc",
@@ -283,6 +307,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
       "favorite": true,
       "pinned": false,
       "series": "VOL",
+      "folderId": "folder-a",
       "tags": ["单行本", "收藏"],
       "customCover": false,
       "bookmarks": [
@@ -307,6 +332,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 - `bookmarks`：按页排序；名称/备注可空；随 JSON 保存。
 - `favorite` / `pinned`：收藏与置顶；`pinned` 参与书架排序。
 - `series` / `tags`：系列名与标签；v2 → v3 迁移时从标题推导系列提示。
+- `folderId` / `folders`：书架文件夹；导入目录时创建或复用同名文件夹，删除文件夹只清空 `folderId`。v3 → v4 迁移允许空文件夹列表。
 - `customCover`：封面是否来自用户图片；重新生成封面时复位。
 - `stats.dailyPages`：本地日期 `yyyy-MM-dd` → 前进翻页数；最多保留 730 天。
 - `version`：用于迁移；读取未知版本时保留原文件并回退默认值。
@@ -417,7 +443,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 
 ## 7. 测试计划
 
-### 7.1 已有自动化覆盖（当前 61 个测试）
+### 7.1 已有自动化覆盖（当前 69 个测试）
 
 - Repository：加载/保存、进度恢复、损坏 JSON 回退、书签增删与名称备注持久化、路径迁移。
 - 导入：加密 PDF 带密码导入、封面生成、失败回滚；`.part` 原子导入失败清理。
@@ -425,6 +451,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 - P1 UI：搜索/空结果、格式/状态筛选、网格/列表切换、多选/全选/退出、标记已读、重命名、丢失文件提示、存储面板、窄屏选择栏。
 - P2 仓储：v2→v3 迁移、系列推导、组织/收藏/置顶、阅读统计、自定义封面、JSON/ZIP 备份恢复与重复跳过。
 - P2 UI：收藏/系列/标签筛选、系列合并页、组织信息编辑、统计面板、备份面板。
+- 文件夹：创建/复用、重命名冲突、删除保留书籍、备份恢复、v4 迁移、主页分组、文件夹页、跨文件夹搜索。
 - P2 基础：阅读统计周/连续天数/合并、`LibraryIndex` 增量索引、文件夹/拖拽路径扫描。
 - 阅读器相关：双页配对、密码对话框、书签编辑框等。
 - 真实样本（本地可选）：196 页 PDF、196 页 MOBI。
@@ -471,7 +498,7 @@ LibraryRepository (ChangeNotifier：书架状态、导入、删除、进度、�
 | M4 | 进度/书签联动、删除、路径迁移、异常提示 | 1.5 天 |
 | M5 | 测试补齐 + 真机验收 + 性能优化 | 2.0 天 |
 | M6（P1） | 搜索、排序、筛选、批量操作、存储统计 | 2.5 天 |
-| M7（P2） | 系列/标签/收藏置顶、统计、备份、文件夹/拖拽导入、增量索引 | 已完成（2026-11-21） |
+| M7（P2） | 系列/标签/收藏置顶、统计、备份、文件夹/拖拽导入、书架文件夹、增量索引 | 已完成（2026-11-21） |
 
 > 当前代码已完成 M1–M7；后续重点是 Android SAF / 桌面拖拽真机验收、SQLite/Isar 条件迁移与超大书架性能。
 

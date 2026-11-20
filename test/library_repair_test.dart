@@ -55,6 +55,20 @@ void main() {
       return file;
     }
 
+    test('imports a file into a shelf folder', () async {
+      final folder = repository.ensureFolder('导入文件夹');
+      final book = await repository.importFile(
+        sample.path,
+        originalName: 'foldered.pdf',
+        folderId: folder.id,
+        pdfPasswordProvider: () async => 'manhua123',
+      );
+      expect(book.folderId, folder.id);
+      expect(repository.folderCounts[folder.id], 1);
+      repository.renameFolder(folder, '改名文件夹');
+      expect(folder.name, '改名文件夹');
+    });
+
     test('relinks a file and keeps metadata, progress and bookmarks', () async {
       final book = await importSample();
       repository.renameBook(book, '加密漫画');

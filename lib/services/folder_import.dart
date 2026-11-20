@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import '../models/comic_book.dart';
 
 /// Scans folders / dropped paths for importable PDF and MOBI files.
+/// 扫描文件夹 / 拖拽路径中的可导入 PDF 与 MOBI 文件。
 class FolderImportScanner {
   static const int defaultMaxFiles = 1000;
 
@@ -29,6 +30,7 @@ class FolderImportScanner {
   }
 
   /// Expands dropped files and directories into a de-duplicated file list.
+  /// 将拖入的文件与目录展开为去重后的文件列表。
   static Future<List<File>> expandPaths(
     Iterable<String> paths, {
     int maxFiles = defaultMaxFiles,

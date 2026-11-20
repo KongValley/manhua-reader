@@ -25,7 +25,8 @@ void main() {
     final dir = Directory('android/app/src/main/res/${entry.key}')
       ..createSync(recursive: true);
     final resized = _resize(master, entry.value);
-    File('${dir.path}/ic_launcher.png').writeAsBytesSync(img.encodePng(resized));
+    File('${dir.path}/ic_launcher.png')
+        .writeAsBytesSync(img.encodePng(resized));
   }
 
   final iosDir = Directory('ios/Runner/Assets.xcassets/AppIcon.appiconset');
@@ -49,14 +50,13 @@ void main() {
     };
     for (final entry in iosIcons.entries) {
       final image = entry.value == 1024 ? square : _resize(square, entry.value);
-      File('${iosDir.path}/${entry.key}').writeAsBytesSync(img.encodePng(image));
+      File('${iosDir.path}/${entry.key}')
+          .writeAsBytesSync(img.encodePng(image));
     }
   }
 
   final icoSizes = [16, 24, 32, 48, 64, 128, 256];
-  final icoImages = [
-    for (final size in icoSizes) _resize(master, size),
-  ];
+  final icoImages = [for (final size in icoSizes) _resize(master, size)];
   final icoBytes = img.IcoEncoder().encodeImages(icoImages);
   File('windows/runner/resources/app_icon.ico').writeAsBytesSync(icoBytes);
 
@@ -88,6 +88,7 @@ img.Image _drawIcon({required bool rounded}) {
   }
 
   // Warm gradient background.
+  // 暖色渐变背景。
   final cream = img.ColorRgba8(255, 249, 238, 255);
   final creamShade = img.ColorRgba8(249, 236, 218, 255);
   final ink = img.ColorRgba8(198, 94, 42, 235);
@@ -108,6 +109,7 @@ img.Image _drawIcon({required bool rounded}) {
   img.fillPolygon(image, vertices: rightPage, color: creamShade);
 
   // Book spine.
+  // 书脊。
   img.drawLine(
     image,
     x1: 512,
@@ -120,6 +122,7 @@ img.Image _drawIcon({required bool rounded}) {
   );
 
   // Rounded text lines keep their shape clean at launcher sizes.
+  // 圆角文字线条在启动器小尺寸下也能保持清晰。
   for (var i = 0; i < 2; i++) {
     final y = 486 + i * 78;
     img.fillRect(
@@ -143,6 +146,7 @@ img.Image _drawIcon({required bool rounded}) {
   }
 
   // Page bottom shading.
+  // 页面底部阴影。
   img.drawLine(
     image,
     x1: 178,
@@ -165,6 +169,7 @@ img.Image _drawIcon({required bool rounded}) {
   );
 
   // A small bookmark ribbon on the right page.
+  // 右页上的小书签丝带。
   final ribbon = [
     img.Point(700, 300),
     img.Point(772, 288),
@@ -198,8 +203,8 @@ int _cornerInset(double y) {
 }
 
 img.Image _resize(img.Image source, int size) => img.copyResize(
-      source,
-      width: size,
-      height: size,
-      interpolation: img.Interpolation.cubic,
-    );
+  source,
+  width: size,
+  height: size,
+  interpolation: img.Interpolation.cubic,
+);

@@ -24,6 +24,10 @@ final _volumePatterns = <RegExp>[
 ///
 /// Examples: `VOL.001` -> `VOL`, `海贼王 第12卷` -> `海贼王`,
 /// `One Piece v03` -> `One Piece`. Returns null when no volume suffix exists.
+/// 尝试从标题或原始文件名推导系列名。
+///
+/// 示例：`VOL.001` -> `VOL`，`海贼王 第12卷` -> `海贼王`，
+/// `One Piece v03` -> `One Piece`。没有卷号后缀时返回 null。
 String? deriveSeriesName(String title, String originalName) {
   final source = title.trim().isNotEmpty
       ? title.trim()

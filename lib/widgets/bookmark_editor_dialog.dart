@@ -5,6 +5,8 @@ import '../theme/app_theme.dart';
 
 /// Values returned by the bookmark editor. Empty strings are converted to
 /// null, so an empty form means "use the default page title and no note".
+/// 书签编辑器返回的值。空字符串会转换为 null，因此空表单表示
+/// “使用默认页码标题且不添加备注”。
 class BookmarkEditResult {
   const BookmarkEditResult({this.label, this.note});
 
@@ -13,6 +15,7 @@ class BookmarkEditResult {
 }
 
 /// Dialog for adding or editing a bookmark's custom name and note.
+/// 添加或编辑书签自定义名称与备注的对话框。
 Future<BookmarkEditResult?> showBookmarkEditorDialog(
   BuildContext context, {
   required int page,

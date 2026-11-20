@@ -7,6 +7,10 @@ import 'package:path_provider/path_provider.dart';
 ///
 /// Everything the app owns (imported copies, covers, library.json) lives under
 /// [root] so the user's original files are never modified.
+/// 应用使用的文件系统位置。
+///
+/// 应用自有的所有内容（导入副本、封面、library.json）都位于 [root] 下，
+/// 因此用户的原文件永远不会被修改。
 class AppPaths {
   AppPaths(this.root);
 
@@ -26,6 +30,7 @@ class AppPaths {
   }
 
   /// Creates (or reuses) an app directory rooted at [root].
+  /// 创建（或复用）以 [root] 为根的应用目录。
   static Future<AppPaths> create(Directory root) async {
     final paths = AppPaths(root);
     await paths.booksDir.create(recursive: true);

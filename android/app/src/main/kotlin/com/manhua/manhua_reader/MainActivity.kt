@@ -31,6 +31,14 @@ class MainActivity : FlutterActivity() {
                             listBooks(Uri.parse(uri), result)
                         }
                     }
+                    "directoryName" -> {
+                        val uri = call.argument<String>("uri")
+                        if (uri == null) {
+                            result.error("bad_args", "Missing directory uri", null)
+                        } else {
+                            directoryName(Uri.parse(uri), result)
+                        }
+                    }
                     "copyToCache" -> {
                         val uri = call.argument<String>("uri")
                         val name = call.argument<String>("name") ?: "book"
@@ -76,8 +84,33 @@ class MainActivity : FlutterActivity() {
             )
         } catch (_: Exception) {
             // Some providers only grant access for the current session.
+            // 部分文件提供方只授予当前会话的访问权限。
         }
         result.success(uri.toString())
+    }
+
+    private fun directoryName(treeUri: Uri, result: MethodChannel.Result) {
+        ioExecutor.execute {
+            var name = "导入的文件夹"
+            try {
+                val rootId = DocumentsContract.getTreeDocumentId(treeUri)
+                val rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId)
+                contentResolver.query(
+                    rootUri,
+                    arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        name = cursor.getString(0)?.takeIf { it.isNotBlank() } ?: name
+                    }
+                }
+                runOnUiThread { result.success(name) }
+            } catch (error: Exception) {
+                runOnUiThread { result.success(name) }
+            }
+        }
     }
 
     private fun listBooks(treeUri: Uri, result: MethodChannel.Result) {

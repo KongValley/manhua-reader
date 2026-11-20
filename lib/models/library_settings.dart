@@ -33,6 +33,7 @@ enum LibrarySort {
 }
 
 /// Persistent bookshelf preferences (separate from reader settings).
+/// 持久化的书架偏好（独立于阅读器设置）。
 class LibrarySettings {
   LibrarySettings({
     this.view = LibraryViewMode.grid,

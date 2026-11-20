@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../../models/toc_entry.dart';
 
 /// Thrown when a MOBI file cannot be read as a comic.
+/// MOBI 文件无法作为漫画读取时抛出。
 class MobiException implements Exception {
   MobiException(this.message);
 
@@ -21,6 +22,8 @@ enum MobiImageType { jpeg, png, gif, bmp, webp }
 
 /// One image record inside a MOBI/PalmDB file. Each record is a complete
 /// image, so pages can be read lazily straight from disk.
+/// MOBI/PalmDB 文件中的一条图片记录。每条记录是一张完整图片，因此可以
+/// 直接从磁盘按需读取页面。
 class MobiImage {
   const MobiImage({
     required this.recordIndex,
@@ -50,6 +53,10 @@ class MobiImage {
 ///
 /// Only the PalmDB record table and the MOBI/EXTH header are read up-front.
 /// Page bytes are fetched on demand, which keeps a 100 MB volume cheap to open.
+/// 漫画型 MOBI：元数据加上按阅读顺序排列的内嵌图片列表。
+///
+/// 启动时只读取 PalmDB 记录表与 MOBI/EXTH 头；页面字节按需读取，
+/// 因此打开 100 MB 的卷也不会产生高开销。
 class MobiBook {
   MobiBook._({
     required this.path,
@@ -65,6 +72,8 @@ class MobiBook {
 
   /// Images in reading order (not necessarily physical record order). The
   /// first entry is the cover when the file declares one via EXTH.
+  /// 按阅读顺序排列的图片（不一定等于物理记录顺序）。文件通过 EXTH 声明
+  /// 封面时，第一项就是封面。
   final List<MobiImage> images;
   final List<TocEntry> toc;
 
@@ -138,6 +147,8 @@ class MobiBook {
 
       // Some unusual files report a wrong first-image index; fall back to a
       // full scan so that image-only books still open.
+      // 少数异常文件会报告错误的首页图片索引；此时回退到完整扫描，
+      // 确保纯图片书籍仍能打开。
       if (recordImages.isEmpty && start > 1) {
         await _collectImages(
           raf: raf,
@@ -233,6 +244,7 @@ class MobiBook {
   }
 
   /// Reads the raw bytes of one page image.
+  /// 读取单页图片的原始字节。
   Future<Uint8List> readPage(int index) async {
     if (index < 0 || index >= images.length) {
       throw RangeError.index(index, images, 'index');
@@ -338,6 +350,7 @@ _MobiHeaderInfo _readMobiHeader(Uint8List record0) {
 }
 
 /// Detects an image by magic bytes.
+/// 通过魔数字节判断图片格式。
 MobiImageType? _detectImageType(Uint8List bytes) {
   if (bytes.length >= 3 &&
       bytes[0] == 0xFF &&
@@ -460,6 +473,7 @@ _ImageSize? _webpSize(Uint8List bytes) {
   }
   if (chunk == 'VP8 ') {
     // Lossy WebP stores the size after the 3-byte start code.
+    // 有损 WebP 在 3 字节起始码之后保存尺寸。
     for (var i = 20; i + 9 < bytes.length && i < 64; i++) {
       if (bytes[i] == 0x9D && bytes[i + 1] == 0x01 && bytes[i + 2] == 0x2A) {
         final width = _u16le(bytes, i + 3) & 0x3FFF;
@@ -552,6 +566,11 @@ class _MobiReadingOrder {
 /// from the order of `<img recindex="...">` tags. Using the HTML sequence keeps
 /// pages in the intended reading order and lets us drop cover thumbnails that
 /// are not part of the book body.
+/// 读取 HTML 文本记录以恢复真实阅读顺序。
+///
+/// Calibre 等工具保存图片记录的物理顺序可能与 `<img recindex="...">`
+/// 标签顺序不同。按 HTML 顺序可保持页面阅读次序，并排除不属于正文的
+/// 封面缩略图。
 Future<_MobiTextInfo?> _readMobiText({
   required RandomAccessFile raf,
   required List<int> offsets,

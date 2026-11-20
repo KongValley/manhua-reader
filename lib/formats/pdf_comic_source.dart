@@ -5,6 +5,7 @@ import '../models/toc_entry.dart';
 import 'comic_source.dart';
 
 /// PDF pages rendered by pdfrx/PDFium.
+/// 由 pdfrx/PDFium 渲染的 PDF 页面。
 class PdfComicSource implements ComicSource {
   PdfComicSource(this._document);
 
