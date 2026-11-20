@@ -238,4 +238,9 @@ dart run tool/generate_icon.dart
 ## 说明
 
 - 应用名：**漫阅**；Flutter package 名：`manhua_reader`。
-- 之前误放在 `test/` 内的嵌套 Flutter 脚手架已移动到 `_archive/test_scaffold/`，避免被 `flutter test` 误执行；`test/` 只保留样本漫画与正式测试。
+- 运行样本测试前，可将自己的 `VOL.001.pdf` / `.mobi` 放入 `test/`；未放置时相关测试会自动跳过。
+
+## License
+
+本项目采用 [MIT License](LICENSE)。
+
