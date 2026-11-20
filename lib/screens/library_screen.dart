@@ -22,6 +22,7 @@ import '../widgets/book_organization_dialog.dart';
 import '../widgets/folder_name_dialog.dart';
 import '../widgets/library_storage_sheet.dart';
 import '../widgets/pdf_password_dialog.dart';
+import '../widgets/reading_progress_bar.dart';
 import '../widgets/reading_stats_sheet.dart';
 import 'folder_screen.dart';
 import 'reader_screen.dart';
@@ -2726,17 +2727,7 @@ class _FolderCard extends StatelessWidget {
               Row(
                 children: [
                   Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(3),
-                      child: LinearProgressIndicator(
-                        value: average,
-                        minHeight: 3,
-                        backgroundColor: Colors.white.withValues(alpha: 0.08),
-                        valueColor: const AlwaysStoppedAnimation(
-                          AppColors.accent,
-                        ),
-                      ),
-                    ),
+                    child: ReadingProgressBar(value: average, height: 5.5),
                   ),
                   const SizedBox(width: 8),
                   Text(
@@ -2838,18 +2829,9 @@ class _ContinueReadingCard extends StatelessWidget {
                           return Row(
                             children: [
                               Expanded(
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(4),
-                                  child: LinearProgressIndicator(
-                                    value: book.progress,
-                                    minHeight: 3,
-                                    backgroundColor: Colors.white.withValues(
-                                      alpha: 0.08,
-                                    ),
-                                    valueColor: const AlwaysStoppedAnimation(
-                                      AppColors.accent,
-                                    ),
-                                  ),
+                                child: ReadingProgressBar(
+                                  value: book.progress,
+                                  height: 7,
                                 ),
                               ),
                               const SizedBox(width: 10),
@@ -3171,16 +3153,14 @@ class _BookListItem extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(3),
-                      child: LinearProgressIndicator(
-                        value: book.progress,
-                        minHeight: 3,
-                        backgroundColor: Colors.white.withValues(alpha: 0.07),
-                        valueColor: AlwaysStoppedAnimation(
-                          missing ? const Color(0xFFE57373) : AppColors.accent,
-                        ),
-                      ),
+                    ReadingProgressBar(
+                      value: book.progress,
+                      height: 5,
+                      gradient: missing
+                          ? const LinearGradient(
+                              colors: [Color(0xFFFF9A9A), Color(0xFFB3453F)],
+                            )
+                          : null,
                     ),
                   ],
                 ),
@@ -3682,17 +3662,7 @@ class _ImportOverlay extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: value,
-                      minHeight: 5,
-                      backgroundColor: Colors.white.withValues(alpha: 0.08),
-                      valueColor: const AlwaysStoppedAnimation(
-                        AppColors.accent,
-                      ),
-                    ),
-                  ),
+                  ReadingProgressBar(value: value, height: 7),
                   const SizedBox(height: 8),
                   Row(
                     children: [
@@ -3784,10 +3754,10 @@ class _ProgressDialog extends StatelessWidget {
                   ),
                   const SizedBox(height: 18),
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(5),
+                    borderRadius: BorderRadius.circular(6),
                     child: LinearProgressIndicator(
                       value: value <= 0 ? null : value,
-                      minHeight: 4,
+                      minHeight: 5.5,
                       backgroundColor: Colors.white.withValues(alpha: 0.08),
                       valueColor: const AlwaysStoppedAnimation(
                         AppColors.accent,

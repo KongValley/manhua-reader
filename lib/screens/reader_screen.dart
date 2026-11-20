@@ -1294,11 +1294,11 @@ class _LoadingView extends StatelessWidget {
                 ),
                 const SizedBox(height: 14),
                 SizedBox(
-                  width: 120,
+                  width: 140,
                   child: ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
+                    borderRadius: BorderRadius.circular(5),
                     child: const LinearProgressIndicator(
-                      minHeight: 2.5,
+                      minHeight: 5,
                       backgroundColor: Color(0x22FFFFFF),
                       valueColor: AlwaysStoppedAnimation(AppColors.accent),
                     ),

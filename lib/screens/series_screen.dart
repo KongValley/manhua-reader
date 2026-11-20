@@ -5,6 +5,7 @@ import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/book_cover.dart';
+import '../widgets/reading_progress_bar.dart';
 import 'reader_screen.dart';
 
 class SeriesScreen extends StatelessWidget {
@@ -221,17 +222,7 @@ class _SeriesCard extends StatelessWidget {
             Row(
               children: [
                 Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: average,
-                      minHeight: 3,
-                      backgroundColor: Colors.white.withValues(alpha: 0.08),
-                      valueColor: const AlwaysStoppedAnimation(
-                        AppColors.accent,
-                      ),
-                    ),
-                  ),
+                  child: ReadingProgressBar(value: average, height: 5.5),
                 ),
                 const SizedBox(width: 8),
                 Text(

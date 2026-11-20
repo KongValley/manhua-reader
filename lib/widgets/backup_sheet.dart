@@ -284,10 +284,10 @@ class _BackupSheetState extends State<BackupSheet> {
                 ),
                 const SizedBox(height: 8),
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(6),
                   child: LinearProgressIndicator(
                     value: _progress <= 0 ? null : _progress.clamp(0.0, 1.0),
-                    minHeight: 4,
+                    minHeight: 5.5,
                     backgroundColor: Colors.white.withValues(alpha: 0.08),
                     valueColor: const AlwaysStoppedAnimation(AppColors.accent),
                   ),
