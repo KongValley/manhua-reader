@@ -46,7 +46,10 @@ class ComicBook {
   }) : bookmarks = bookmarks ?? <Bookmark>[];
 
   final String id;
-  final String title;
+
+  /// Display title. Can be changed from the bookshelf without touching the
+  /// original file name.
+  String title;
 
   /// Original file name as picked by the user, used for duplicate detection.
   final String originalName;
@@ -58,7 +61,7 @@ class ComicBook {
   String filePath;
   final ComicFormat format;
   int pageCount;
-  final int fileSize;
+  int fileSize;
   final DateTime addedAt;
 
   /// Zero-based index of the last page read.

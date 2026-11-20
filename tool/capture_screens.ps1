@@ -13,6 +13,7 @@ param(
   [double]$BookTapX = 0.26,
   [double]$BookTapY = 0.47,
   [string]$Clicks = "",
+  [string]$LongPresses = "",
   [string]$SendText = "",
   [string]$ExtraArgs = "",
   [switch]$Rtl
@@ -113,6 +114,7 @@ try {
   if ($cw -lt 300 -or $ch -lt 300) {
     throw "Unexpected client size ${cw}x${ch}; window did not reach the requested size"
   }
+  Write-Output "Client origin: $($origin.X),$($origin.Y); client: ${cw}x${ch}"
 
   function Click-At([double]$fx, [double]$fy) {
     $x = $origin.X + [int]($cw * $fx)
@@ -123,6 +125,17 @@ try {
     Start-Sleep -Milliseconds 60
     [ManhuaShot]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
     Write-Output "Clicked at $x,$y"
+  }
+
+  function Long-Press-At([double]$fx, [double]$fy) {
+    $x = $origin.X + [int]($cw * $fx)
+    $y = $origin.Y + [int]($ch * $fy)
+    [ManhuaShot]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 100
+    [ManhuaShot]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 900
+    [ManhuaShot]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    Write-Output "Long-pressed at $x,$y"
   }
 
   if ($OpenFirstBook) {
@@ -152,6 +165,16 @@ try {
     Start-Sleep -Seconds 5
     Click-At 0.5 0.5
     Start-Sleep -Milliseconds 900
+  }
+  if ($LongPresses -ne "") {
+    foreach ($pair in $LongPresses.Split(';')) {
+      $parts = $pair.Split(',')
+      if ($parts.Count -eq 2) {
+        Long-Press-At ([double]$parts[0]) ([double]$parts[1])
+        Start-Sleep -Milliseconds 900
+      }
+    }
+    Start-Sleep -Seconds 1
   }
   if ($Clicks -ne "") {
     foreach ($pair in $Clicks.Split(';')) {

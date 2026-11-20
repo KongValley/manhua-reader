@@ -9,7 +9,15 @@
 ## 功能
 
 - **导入本地漫画**：支持多选 PDF / MOBI，导入时复制到应用私有目录，不改动原文件。
-- **书架**：封面缩略图、格式标签、页数、阅读进度、继续阅读卡片；长按或点右上角菜单可删除（只删应用内副本）。
+- **书架**：封面缩略图、格式标签、页数、阅读进度、继续阅读卡片；点卡片右上角菜单或长按进入管理（只删应用内副本）。
+- **书架整理（P1）**
+  - 按书名 / 原始文件名即时搜索，未命中时提示清除筛选。
+  - 按最近阅读、最近导入、书名、阅读进度排序；按 PDF / MOBI、未读 / 阅读中 / 已读完筛选。
+  - 网格 / 列表视图切换，偏好写入 `library.json`，下次启动保留。
+  - 长按进入多选：全选、批量标记已读、批量删除。
+  - 重命名只修改书架显示名；丢失文件可重新定位替换，保留进度与书签；封面可手动重建。
+  - 存储管理显示总占用、每本书占用、缓存与无引用文件，并支持一键清理。
+- **可靠导入**：多文件顺序导入，显示当前 / 总数 / 成功 / 失败与百分比；支持取消剩余任务；先写 `.part` 临时文件再原子改名，失败自动回滚。
 - **阅读器**
   - 横向翻页（PageView）与纵向连续滚动两种模式，切换时保留当前页。
   - **双页模式**：横向模式下按「封面单页 + 后续两页一跨」组合，适合平板横屏；可从底部工具栏一键开关，并记住设置。
@@ -120,7 +128,7 @@ lib/
 ├─ main_demo.dart             # 演示/截图入口：导入 test/ 样本，支持 --open=pdf|mobi
 ├─ app.dart                   # MaterialApp 与鼠标拖动行为
 ├─ theme/                     # 深色暖色主题
-├─ models/                    # ComicBook、ReaderSettings、Bookmark、TocEntry
+├─ models/                    # ComicBook、ReaderSettings、LibrarySettings、Bookmark、TocEntry
 ├─ formats/
 │  ├─ comic_source.dart       # 统一页面源接口（页面 / 缩略图 / 目录）
 │  ├─ pdf_comic_source.dart   # pdfrx 渲染 + PDF outline 解析
@@ -128,17 +136,18 @@ lib/
 │  ├─ comic_source_factory.dart
 │  └─ mobi/mobi_book.dart     # PalmDB / MOBI / EXTH / HTML 阅读顺序解析
 ├─ screens/
-│  ├─ library_screen.dart     # 书架、导入、删除、继续阅读
+│  ├─ library_screen.dart     # 书架、搜索筛选、多选、导入、维护、存储管理
 │  └─ reader_screen.dart      # 横/纵向、双页、缩放、菜单、跳页
 ├─ services/
 │  ├─ app_paths.dart
-│  ├─ library_repository.dart # 导入、持久化、进度、书签、阅读设置
+│  ├─ library_repository.dart # 导入 / 重定位 / 封面 / 删除 / 存储统计 / 持久化
 │  ├─ cover_generator.dart    # PDF / 图片封面缩略图
 │  └─ pdf_password_cache.dart # 会话级密码缓存（不落盘）
 ├─ utils/pagination.dart      # 双页跨页配对
 └─ widgets/
    ├─ book_cover.dart
    ├─ bookmark_editor_dialog.dart   # 书签名称 / 备注编辑
+   ├─ library_storage_sheet.dart    # 存储统计与清理
    ├─ pdf_password_dialog.dart      # 加密 PDF 解锁对话框
    └─ reader_navigation_sheet.dart  # 目录 / 书签 / 缩略图面板
 test/
@@ -148,7 +157,10 @@ test/
 ├─ pdf_password_dialog_test.dart # 密码对话框输入 / 取消
 ├─ bookmark_editor_dialog_test.dart # 书签名称 / 备注对话框
 ├─ pagination_test.dart       # 双页配对逻辑
-├─ library_repository_test.dart
+├─ library_repository_test.dart # 加载 / 保存 / 进度 / 书签 / 路径迁移
+├─ library_p1_test.dart       # 视图/排序、重命名、存储清理、批量删除/已读、原子导入
+├─ library_repair_test.dart   # 丢失文件重定位、封面重建、失败回滚
+├─ library_p1_screen_test.dart # 搜索筛选、列表、多选、重命名、缺文件、存储面板
 ├─ library_screen_test.dart
 ├─ encrypted_sample.pdf       # 加密测试样本（密码 manhua123）
 └─ VOL.001.pdf / .mobi        # 本地可选漫画样本（不随仓库提交）
@@ -165,7 +177,7 @@ flutter analyze
 flutter test
 ```
 
-当前 22 个测试（本机样本齐全时全部通过；公开仓库不含 `test/VOL.001.*`，缺失的相关测试会自动跳过），包括：
+当前 41 个测试（本机样本齐全时全部通过；公开仓库不含 `test/VOL.001.*`，缺失的相关测试会自动跳过），包括：
 
 - 真实样本 `test/VOL.001.mobi`：196 页、EXTH 封面、HTML `<img recindex>` 阅读顺序、尺寸解析、按页懒读取、非法文件拒绝。
 - 真实样本 `test/VOL.001.pdf`：打开 196 页文档、确认无内嵌 outline、用 PDFium 渲染首页并读取像素。
@@ -174,6 +186,12 @@ flutter test
 - 书签自定义名称与备注：编辑对话框预填 / 保存、空表单默认书签、名称与备注的持久化与清除。
 - 双页配对逻辑（封面单页 + 后续成对）。
 - 书架 JSON 的加载 / 保存 / 进度恢复 / 书签增删与持久化 / 损坏容错。
+- P1 书架偏好：网格 / 列表与排序方式的持久化；重命名空白规整与持久化。
+- P1 批量操作：批量删除文件 / 封面 / 密码缓存；批量标记已读与进度持久化。
+- P1 存储管理：引用文件、缓存、无引用文件的统计与清理，清理后保留书架文件。
+- P1 导入原子性：失败导入不会留下 `.part` 或半成品副本。
+- P1 文件修复：重定位后保留标题 / 进度 / 书签，失败时不动原书；封面重建与源文件丢失处理。
+- P1 书架 UI：搜索与空结果、格式 / 状态筛选、列表切换、多选 / 全选 / 退出、重命名、缺失文件提示、存储面板。
 - iOS 等平台容器路径变化后的文件 / 封面路径自动迁移。
 - 空书架界面冒烟测试。
 
@@ -199,7 +217,7 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 
 演示入口还支持 `--page=N`、`--bookmarks=1,10,50`、`--named-bookmarks`、`--double/--single`、`--encrypted`（导入加密测试样本）、`--cached-password`（用测试密码预填会话缓存），便于复现目录、书签、双页与密码流程截图。
 
-`tool/capture_screens.ps1` 会用 `MANHUA_WINDOW_WIDTH/HEIGHT` 环境变量控制初始窗口尺寸，并自动截图，方便做手机 / 平板尺寸的视觉验收。
+`tool/capture_screens.ps1` 会用 `MANHUA_WINDOW_WIDTH/HEIGHT` 环境变量控制初始窗口尺寸，并自动截图，方便做手机 / 平板尺寸的视觉验收；`-Clicks "x,y;..."` 与 `-LongPresses "x,y;..."` 接受相对客户区的归一化坐标（0–1），可用于复现筛选、多选等交互。
 备注：`windows/runner/main.cpp` 支持这两个环境变量，仅用于开发验收，正常启动不设置时保持 1280×800。
 
 ## 实现要点
@@ -212,6 +230,9 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 - **双页**：`buildSpreads` 采用「封面单页 + (2,3)、(4,5)…」配对；每跨按可用宽高比缩放两页，RTL 时交换左右页；跨页整体支持双击缩放。
 - **统一体验**：两种格式共用一个阅读器、同一套手势、模式、进度、书签与设置；MOBI 图片解码后以 `ui.Image` 管理生命周期，离屏即释放。
 - **进度**：每页变化即时写入书架内存并做 450ms 去抖落盘；退出阅读器 / 应用进入后台时强制 flush。
+- **P1 书架**：搜索与筛选在内存中完成，不改动书架顺序；排序 / 视图偏好与书架一起写入 `library.json`（schema `version: 2`）。重命名只改 `title`，原文件名保留用于重复检测。
+- **P1 存储与修复**：`storageReport()` 按 `books/`、`covers/`、`cache/` 实际扫描，区分被引用文件、缓存与无引用文件；`cleanupStorage()` 只删除后两类。重定位 / 封面重建使用带时间戳的新文件名，避免 Flutter 图片缓存显示旧图；重定位成功后才删除旧文件并清理越界书签。
+- **P1 原子导入**：所有导入先写 `<id>.ext.part`，复制完成后 `rename` 为目标文件；解析或封面失败时统一回滚副本、`.part` 与半成品封面。
 
 ## 已知限制
 
@@ -220,6 +241,8 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 - MOBI 章节目前只从 HTML 标题（`<h1>`–`<h6>`）推导，未解析 NCX/INDX 二进制目录；没有章节的卷使用页码目录 + 缩略图回退。PDF 没有 outline 时同样回退。
 - 双页模式仅用于横向模式，采用「封面单页」配对；暂不支持自动识别跨页扫描、自动裁边或左右装订方向自动判断。
 - 书签名称/备注为纯文本，暂不支持富文本、搜索或跨书签分类。
+- 批量操作（删除 / 标记已读）没有撤销；删除前会二次确认。
+- Windows **Release** 增量构建在新增 Material 图标后，Flutter 的图标字体子集偶尔不会刷新，表现为按钮空白或图标缺失。遇到时删除 `build/windows/x64/runner/Release` 后重新执行 `flutter build windows --release --no-pub` 即可；Debug 构建不受影响。
 - 放大为位图缩放，极限放大的清晰度受当前渲染分辨率限制。
 - 暂无注释、夜间滤镜、自动翻页等功能。
 - Web 平台未适配（本地文件存储依赖 `dart:io`），当前面向 Android / iOS / Windows。
