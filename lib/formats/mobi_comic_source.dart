@@ -28,8 +28,12 @@ class MobiComicSource implements ComicSource {
   }
 
   @override
-  Widget buildPage(BuildContext context, int index) {
-    return MobiPageImage(book: book, pageIndex: index);
+  Widget buildPage(
+    BuildContext context,
+    int index, {
+    ValueChanged<ui.Image>? onImage,
+  }) {
+    return MobiPageImage(book: book, pageIndex: index, onImage: onImage);
   }
 
   @override
@@ -58,6 +62,7 @@ class MobiPageImage extends StatefulWidget {
     required this.pageIndex,
     this.targetWidth,
     this.compact = false,
+    this.onImage,
     super.key,
   });
 
@@ -71,6 +76,8 @@ class MobiPageImage extends StatefulWidget {
   /// Compact mode hides loading/error text for tiny navigation thumbnails.
   /// 紧凑模式会在微型导航缩略图中隐藏加载 / 错误文字。
   final bool compact;
+
+  final ValueChanged<ui.Image>? onImage;
 
   @override
   State<MobiPageImage> createState() => _MobiPageImageState();
@@ -95,6 +102,8 @@ class _MobiPageImageState extends State<MobiPageImage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.book != widget.book ||
         oldWidget.pageIndex != widget.pageIndex) {
+      _image?.dispose();
+      _image = null;
       _load();
     }
   }
@@ -198,18 +207,20 @@ class _MobiPageImageState extends State<MobiPageImage> {
       );
     }
 
+    final image = _image;
+    if (image != null) widget.onImage?.call(image);
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (_image != null)
+        if (image != null)
           RawImage(
-            image: _image,
+            image: image,
             fit: BoxFit.contain,
             filterQuality: FilterQuality.medium,
           )
         else
           const ColoredBox(color: Color(0xFF0F1013)),
-        if (_image == null && !widget.compact)
+        if (image == null && !widget.compact)
           const Center(
             child: SizedBox(
               width: 26,

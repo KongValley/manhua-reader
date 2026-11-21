@@ -16,6 +16,7 @@ import '../utils/format.dart';
 import '../utils/pagination.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/bookmark_editor_dialog.dart';
+import '../widgets/paper_page_view.dart';
 import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reader_navigation_sheet.dart';
 
@@ -46,6 +47,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<List<TocEntry>>? _tocFuture;
 
   PageController? _pageController;
+  int? _pendingHorizontalPage;
   ScrollController? _verticalController;
   double _verticalWidth = -1;
   List<double> _pageOffsets = const [];
@@ -116,9 +118,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _currentPage = clampPage(_currentPage, pageCount);
         _spreads = buildSpreads(pageCount);
         _tocFuture = source.loadToc();
-        _pageController = PageController(
-          initialPage: _initialPageControllerPage(),
-        );
+        _pageController = _startingPageController();
         _loading = false;
       });
       _repository.updateProgress(_book, _currentPage);
@@ -147,12 +147,11 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   bool get _usesSpreads => _doublePage && _mode == ReadingMode.horizontal;
 
-  int _initialPageControllerPage() {
-    if (_usesSpreads && _spreads.isNotEmpty) {
-      return spreadIndexForPage(_spreads, _currentPage);
-    }
-    return _currentPage;
-  }
+  int _slotForPage(int page) =>
+      _usesSpreads ? spreadIndexForPage(_spreads, page) : page;
+
+  PageController _startingPageController() =>
+      PageController(initialPage: _slotForPage(_currentPage), keepPage: false);
 
   List<int> get _visibleSpread {
     if (_usesSpreads && _spreads.isNotEmpty) {
@@ -254,54 +253,76 @@ class _ReaderScreenState extends State<ReaderScreen>
     _repository.updateProgress(_book, _currentPage);
   }
 
+  void _handleHorizontalSettled(int slot) {
+    final requested = _pendingHorizontalPage;
+    _pendingHorizontalPage = null;
+    if (requested != null && _slotForPage(requested) == slot) {
+      _handlePageChanged(requested);
+    } else if (_usesSpreads) {
+      _handleSpreadChanged(slot);
+    } else {
+      _handlePageChanged(slot);
+    }
+  }
+
   void _goToPage(int page, {bool animate = true, bool revealChrome = false}) {
     if (_pageCount <= 0) return;
     final target = clampPage(page, _pageCount);
-    if (target == _currentPage) {
-      if (revealChrome) _keepChromeVisible();
-      return;
-    }
-    final previousPage = _currentPage;
-    setState(() => _currentPage = target);
-    _persistProgressSoon();
     if (revealChrome) _keepChromeVisible();
 
     if (_mode == ReadingMode.horizontal) {
       final controller = _pageController;
-      if (controller == null || !controller.hasClients) return;
-      final currentControllerPage = _usesSpreads
-          ? spreadIndexForPage(_spreads, previousPage)
-          : previousPage;
-      final controllerPage = _usesSpreads
-          ? spreadIndexForPage(_spreads, target)
-          : target;
-      final distance = (controllerPage - currentControllerPage).abs();
-      if (animate && distance <= 1) {
-        controller.animateToPage(
-          controllerPage,
-          duration: const Duration(milliseconds: 280),
-          curve: Curves.easeOutCubic,
-        );
-      } else {
-        controller.jumpToPage(controllerPage);
+      final targetSlot = _slotForPage(target);
+      if (controller != null && controller.hasClients) {
+        final distance = (targetSlot - _slotForPage(_currentPage)).abs();
+        if (animate &&
+            distance == 1 &&
+            !MediaQuery.disableAnimationsOf(context)) {
+          if (_pendingHorizontalPage != target) {
+            _pendingHorizontalPage = target;
+            unawaited(
+              controller.animateToPage(
+                targetSlot,
+                duration: const Duration(milliseconds: 420),
+                curve: Curves.easeInOutCubic,
+              ),
+            );
+          }
+          return;
+        }
+        _pendingHorizontalPage = null;
+        _handlePageChanged(target);
+        if (controller.page != targetSlot) controller.jumpToPage(targetSlot);
+      } else if (target != _currentPage) {
+        setState(() {
+          _pendingHorizontalPage = null;
+          _currentPage = target;
+          _pageController = _startingPageController();
+        });
+        _disposeLater(controller);
+        _persistProgressSoon();
       }
+      return;
+    }
+
+    if (target == _currentPage) return;
+    setState(() => _currentPage = target);
+    _persistProgressSoon();
+    final controller = _verticalController;
+    if (controller == null ||
+        !controller.hasClients ||
+        target >= _pageOffsets.length) {
+      return;
+    }
+    final offset = _pageOffsets[target];
+    if (animate) {
+      controller.animateTo(
+        offset,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
     } else {
-      final controller = _verticalController;
-      if (controller == null ||
-          !controller.hasClients ||
-          target >= _pageOffsets.length) {
-        return;
-      }
-      final offset = _pageOffsets[target];
-      if (animate) {
-        controller.animateTo(
-          offset,
-          duration: const Duration(milliseconds: 260),
-          curve: Curves.easeOutCubic,
-        );
-      } else {
-        controller.jumpTo(offset);
-      }
+      controller.jumpTo(offset);
     }
   }
 
@@ -340,13 +361,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     final oldPage = _pageController;
     setState(() {
       _mode = next;
+      _pendingHorizontalPage = null;
       _verticalWidth = -1;
       _pageOffsets = const [];
       if (next == ReadingMode.horizontal) {
         _verticalController = null;
-        _pageController = PageController(
-          initialPage: _initialPageControllerPage(),
-        );
+        _pageController = _startingPageController();
       } else {
         _pageController = null;
       }
@@ -361,9 +381,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     final old = _pageController;
     setState(() {
       _rightToLeft = !_rightToLeft;
-      _pageController = PageController(
-        initialPage: _initialPageControllerPage(),
-      );
+      _pendingHorizontalPage = null;
+      _pageController = _startingPageController();
     });
     _disposeLater(old);
     _keepChromeVisible();
@@ -377,6 +396,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final oldVertical = _verticalController;
     setState(() {
       _doublePage = next;
+      _pendingHorizontalPage = null;
       if (_mode != ReadingMode.horizontal) {
         _mode = ReadingMode.horizontal;
         _repository.setReadingMode(ReadingMode.horizontal);
@@ -384,9 +404,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _verticalWidth = -1;
         _pageOffsets = const [];
       }
-      _pageController = PageController(
-        initialPage: _initialPageControllerPage(),
-      );
+      _pageController = _startingPageController();
     });
     _disposeLater(oldPage);
     _disposeLater(oldVertical);
@@ -655,30 +673,21 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_mode == ReadingMode.horizontal) {
       final controller = _pageController;
       if (controller == null) return const SizedBox();
-      if (_usesSpreads) {
-        return _buildSpreadPages(source, controller);
-      }
-      return PageView.builder(
+      return PaperPageView(
+        key: ObjectKey(controller),
         controller: controller,
-        reverse: _rightToLeft,
-        physics: const PageScrollPhysics(),
-        allowImplicitScrolling: true,
-        onPageChanged: _handlePageChanged,
-        itemCount: _pageCount,
-        itemBuilder: (context, index) {
-          final size = source.pageSize(index);
-          final aspect = size.width / size.height;
-          final leftAction = _rightToLeft ? _goNext : _goPrevious;
-          final rightAction = _rightToLeft ? _goPrevious : _goNext;
-          return _HorizontalReaderPage(
-            key: ValueKey('h-$index'),
-            aspectRatio: aspect,
-            onTapLeft: leftAction,
-            onTapRight: rightAction,
-            onToggleChrome: _toggleChrome,
-            child: source.buildPage(context, index),
-          );
-        },
+        source: source,
+        rightToLeft: _rightToLeft,
+        spreads: _usesSpreads ? _spreads : null,
+        background: AppColors.readerBackground,
+        onSettled: _handleHorizontalSettled,
+        wrapPage: (child, onZoomChanged) => _ZoomablePage(
+          onTap: _toggleChrome,
+          onTapLeft: _rightToLeft ? _goNext : _goPrevious,
+          onTapRight: _rightToLeft ? _goPrevious : _goNext,
+          onZoomChanged: onZoomChanged,
+          child: child,
+        ),
       );
     }
 
@@ -710,30 +719,6 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
             );
           },
-        );
-      },
-    );
-  }
-
-  Widget _buildSpreadPages(ComicSource source, PageController controller) {
-    final leftAction = _rightToLeft ? _goNext : _goPrevious;
-    final rightAction = _rightToLeft ? _goPrevious : _goNext;
-    return PageView.builder(
-      controller: controller,
-      reverse: _rightToLeft,
-      physics: const PageScrollPhysics(),
-      allowImplicitScrolling: true,
-      onPageChanged: _handleSpreadChanged,
-      itemCount: _spreads.length,
-      itemBuilder: (context, index) {
-        return _SpreadReaderPage(
-          key: ValueKey('spread-$index'),
-          source: source,
-          pages: _spreads[index],
-          rightToLeft: _rightToLeft,
-          onTapLeft: leftAction,
-          onTapRight: rightAction,
-          onToggleChrome: _toggleChrome,
         );
       },
     );
@@ -1015,128 +1000,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 }
 
-class _HorizontalReaderPage extends StatelessWidget {
-  const _HorizontalReaderPage({
-    required this.aspectRatio,
-    required this.onTapLeft,
-    required this.onTapRight,
-    required this.onToggleChrome,
-    required this.child,
-    super.key,
-  });
-
-  final double aspectRatio;
-  final VoidCallback onTapLeft;
-  final VoidCallback onTapRight;
-  final VoidCallback onToggleChrome;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        final height = constraints.maxHeight;
-        final ratio = aspectRatio.isFinite && aspectRatio > 0
-            ? aspectRatio
-            : ComicSource.fallbackPageSize.width /
-                  ComicSource.fallbackPageSize.height;
-        var pageWidth = width;
-        var pageHeight = pageWidth / ratio;
-        if (pageHeight > height) {
-          pageHeight = height;
-          pageWidth = pageHeight * ratio;
-        }
-        return _ZoomablePage(
-          onTap: onToggleChrome,
-          onTapLeft: onTapLeft,
-          onTapRight: onTapRight,
-          child: Center(
-            child: SizedBox(width: pageWidth, height: pageHeight, child: child),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _SpreadReaderPage extends StatelessWidget {
-  const _SpreadReaderPage({
-    required this.source,
-    required this.pages,
-    required this.rightToLeft,
-    required this.onTapLeft,
-    required this.onTapRight,
-    required this.onToggleChrome,
-    super.key,
-  });
-
-  final ComicSource source;
-  final List<int> pages;
-  final bool rightToLeft;
-  final VoidCallback onTapLeft;
-  final VoidCallback onTapRight;
-  final VoidCallback onToggleChrome;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final ordered = rightToLeft ? pages.reversed.toList() : pages;
-        final aspects = <double>[];
-        for (final page in ordered) {
-          final size = ComicSource.safePageSize(source.pageSize(page));
-          aspects.add(size.width / size.height);
-        }
-        final aspectSum = aspects.fold<double>(
-          0.0,
-          (sum, value) => sum + value,
-        );
-        final gap = ordered.length > 1 ? 6.0 : 0.0;
-        final totalGap = gap * (ordered.length - 1);
-        final maxWidth = constraints.maxWidth;
-        final maxHeight = constraints.maxHeight.isFinite
-            ? constraints.maxHeight
-            : maxWidth / aspectSum;
-        var height = maxHeight;
-        var width = height * aspectSum + totalGap;
-        if (width > maxWidth) {
-          height = aspectSum <= 0 ? 0 : (maxWidth - totalGap) / aspectSum;
-          width = maxWidth;
-        }
-        if (height <= 0 || width <= 0) return const SizedBox();
-
-        return _ZoomablePage(
-          onTap: onToggleChrome,
-          onTapLeft: onTapLeft,
-          onTapRight: onTapRight,
-          child: Center(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (var i = 0; i < ordered.length; i++) ...[
-                  if (i > 0) SizedBox(width: gap),
-                  SizedBox(
-                    width: height * aspects[i],
-                    height: height,
-                    child: source.buildPage(context, ordered[i]),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _ZoomablePage extends StatefulWidget {
   const _ZoomablePage({
     required this.child,
     required this.onTap,
     required this.onTapLeft,
     required this.onTapRight,
+    this.onZoomChanged,
     super.key,
   });
 
@@ -1144,6 +1014,7 @@ class _ZoomablePage extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback? onTapLeft;
   final VoidCallback? onTapRight;
+  final ValueChanged<bool>? onZoomChanged;
 
   @override
   State<_ZoomablePage> createState() => _ZoomablePageState();
@@ -1164,6 +1035,7 @@ class _ZoomablePageState extends State<_ZoomablePage> {
     final zoomed = _controller.value.getMaxScaleOnAxis() > 1.01;
     if (zoomed != _zoomed) {
       setState(() => _zoomed = zoomed);
+      widget.onZoomChanged?.call(zoomed);
     }
   }
 
@@ -1205,6 +1077,7 @@ class _ZoomablePageState extends State<_ZoomablePage> {
 
   @override
   void dispose() {
+    if (_zoomed) widget.onZoomChanged?.call(false);
     _controller
       ..removeListener(_handleTransform)
       ..dispose();
@@ -1280,7 +1153,7 @@ class _LoadingView extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const WarmLogo(size: 54),
+                const AppLogo(size: 54),
                 const SizedBox(height: 22),
                 Text(
                   title,

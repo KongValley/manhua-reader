@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"
+     viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">漫阅应用图标</title>
+  <rect width="256" height="256" rx="57" fill="#FFFAEF"/>
+  <g fill="#3726CF">
+    <path d="M55.8 52.9 Q56.7 46.5 63 45.9 L210.8 32.4 Q219 31.7 218 39.7 L208.3 117.4 L44.4 130.5 Z"/>
+    <path d="M42.7 144.3 L98.8 139.8 L89.7 213.1 L39.9 217.3 Q32 218 33 210.4 Z M51 176 L72 152 L82 151 L60 176 Z M48 200 L78 166 L88 165 L58 200 Z" fill-rule="evenodd"/>
+    <path d="M113.8 138.6 L206.6 131.1 L200.3 181.2 L174.8 205.8 L104.9 211.8 Z"/>
+    <path d="M153 46 L163 69 L193 56 L178 78 L196 93 L167 93 L150 114 L144 96 L111 105 L126 86 L100 73 L134 72 Z" fill="#DDF34D"/>
+    <path d="M174.8 205.8 L178.1 184.9 Q178.4 182 181.8 181.7 L200.3 181.2 Z" fill="#ABA2FF"/>
+  </g>
+</svg>

@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/widgets.dart';
 
 import '../models/toc_entry.dart';
@@ -16,7 +18,14 @@ abstract class ComicSource {
 
   Size pageSize(int index);
 
-  Widget buildPage(BuildContext context, int index);
+  /// [onImage] borrows the rendered image during the callback. Clone its handle
+  /// to keep it beyond the callback.
+  /// [onImage] 在回调期间借用渲染结果。需要在回调后使用时，须克隆图像句柄。
+  Widget buildPage(
+    BuildContext context,
+    int index, {
+    ValueChanged<ui.Image>? onImage,
+  });
 
   /// A small preview used by the navigation sheet's thumbnail grid.
   /// 导航面板缩略图网格使用的小预览。

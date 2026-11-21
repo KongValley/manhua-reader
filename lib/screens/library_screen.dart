@@ -1350,7 +1350,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       builder: (context) => AlertDialog(
         title: Row(
           children: [
-            const WarmLogo(size: 34),
+            const AppLogo(size: 34),
             const SizedBox(width: 12),
             const Text('漫阅'),
           ],
@@ -1874,7 +1874,7 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const WarmLogo(),
+        const AppLogo(),
         const SizedBox(width: 13),
         Expanded(
           child: Column(
@@ -3640,7 +3640,7 @@ class _ImportOverlay extends StatelessWidget {
                 children: [
                   const Row(
                     children: [
-                      WarmLogo(size: 30),
+                      AppLogo(size: 30),
                       SizedBox(width: 10),
                       Text(
                         '导入漫画',

@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
 
@@ -21,7 +23,11 @@ class PdfComicSource implements ComicSource {
       ComicSource.safePageSize(_document.pages[index].size);
 
   @override
-  Widget buildPage(BuildContext context, int index) {
+  Widget buildPage(
+    BuildContext context,
+    int index, {
+    ValueChanged<ui.Image>? onImage,
+  }) {
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -41,6 +47,13 @@ class PdfComicSource implements ComicSource {
           maximumDpi: 300,
           backgroundColor: Colors.transparent,
           decoration: const BoxDecoration(color: Colors.transparent),
+          decorationBuilder: onImage == null
+              ? null
+              : (context, pageSize, page, rawImage) {
+                  final image = rawImage?.image;
+                  if (image != null) onImage(image);
+                  return Center(child: rawImage);
+                },
         ),
       ],
     );

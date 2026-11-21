@@ -35,6 +35,7 @@
 - **可靠导入**：多文件顺序导入，显示当前 / 总数 / 成功 / 失败与百分比；支持取消剩余任务；先写 `.part` 临时文件再原子改名，失败自动回滚。
 - **阅读器**
   - 横向翻页（PageView）与纵向连续滚动两种模式，切换时保留当前页。
+  - **仿真纸张翻页**：横向拖动时纸页随手势卷起，露出纸背与下一页，松手后翻过或回弹。点按页边和使用方向键也可触发，适用于 PDF、MOBI 的单页和双页。
   - **双页模式**：横向模式下按「封面单页 + 后续两页一跨」组合，适合平板横屏；可从底部工具栏一键开关，并记住设置。
   - 左右点击区域翻页，点击中间显示 / 隐藏菜单。
   - 双击放大、双指缩放与拖动，双击可复位。
@@ -313,7 +314,7 @@ build/windows/x64/runner/Debug/manhua_reader.exe --open=mobi --mode=horizontal
 
 ![应用图标](assets/app_icon.png)
 
-`assets/app_icon.png` 为 1024px 主图标；Android mipmap、iOS AppIcon 与 Windows `app_icon.ico` 由 `tool/generate_icon.dart` 生成。
+[`assets/app_icon.png`](assets/app_icon.png) 是应用内共用的 1024 × 1024 主图标。[品牌标识](assets/branding/README.md) 提供 SVG 源稿和使用预览。更新主图标后，运行以下命令生成 Android mipmap、iOS AppIcon 和 Windows `app_icon.ico`。
 
 ```bash
 dart run tool/generate_icon.dart

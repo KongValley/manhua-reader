@@ -5,43 +5,21 @@ import 'package:flutter/material.dart';
 import '../models/comic_book.dart';
 import '../theme/app_theme.dart';
 
-/// Gradient logo mark used in the library header.
-/// 书架页头使用的渐变 Logo 标识。
-class WarmLogo extends StatelessWidget {
-  const WarmLogo({this.size = 46, super.key});
+/// App logo used in the library and reader.
+/// 书架和阅读器共用的应用标志。
+class AppLogo extends StatelessWidget {
+  const AppLogo({this.size = 46, super.key});
 
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return Image.asset(
+      'assets/app_icon.png',
       width: size,
       height: size,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [AppColors.accent, AppColors.accentDeep],
-        ),
-        borderRadius: BorderRadius.circular(size * 0.32),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.accentDeep.withValues(alpha: 0.32),
-            blurRadius: 20,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        '漫',
-        style: TextStyle(
-          fontSize: size * 0.46,
-          fontWeight: FontWeight.w800,
-          color: const Color(0xFF2A1500),
-          height: 1,
-        ),
-      ),
+      cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).ceil(),
+      excludeFromSemantics: true,
     );
   }
 }
