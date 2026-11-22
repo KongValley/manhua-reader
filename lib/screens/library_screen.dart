@@ -1030,11 +1030,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (!mounted || action == null) return;
     switch (action) {
       case 'favorite':
-        _repository.toggleFavorite(book);
-        _toast(book.favorite ? '已收藏《${book.title}》' : '已取消收藏');
+        _toggleFavorite(book);
       case 'pin':
-        _repository.togglePinned(book);
-        _toast(book.pinned ? '已置顶《${book.title}》' : '已取消置顶');
+        _togglePinned(book);
       case 'read':
         await _openBook(book);
       case 'rename':
@@ -1294,10 +1292,54 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (mounted) _toast('已删除《${book.title}》');
   }
 
+  List<ComicBook> get _selectedBooks => _repository.books
+      .where((book) => _selectedIds.contains(book.id))
+      .toList();
+
+  void _toggleFavorite(ComicBook book) {
+    _repository.toggleFavorite(book);
+    _toast(book.favorite ? '已收藏《${book.title}》' : '已取消收藏《${book.title}》');
+  }
+
+  void _togglePinned(ComicBook book) {
+    _repository.togglePinned(book);
+    _toast(book.pinned ? '已置顶《${book.title}》' : '已取消置顶《${book.title}》');
+  }
+
+  void _favoriteSelected() {
+    final selected = _selectedBooks;
+    if (selected.isEmpty) return;
+    final favorite = selected.any((book) => !book.favorite);
+    final changed = _repository.setBooksFavorite(selected, favorite);
+    if (changed == 0) return;
+    _pruneSelectionToVisible();
+    _toast(favorite ? '已收藏 $changed 本' : '已取消收藏 $changed 本');
+  }
+
+  /// Drops selected books that the active filters no longer show.
+  /// 移除被当前筛选隐藏的选中项，全部隐藏时退出多选。
+  void _pruneSelectionToVisible() {
+    final visibleIds = _visibleBooks(_repository.books)
+        .map((book) => book.id)
+        .toSet();
+    if (_selectedIds.every(visibleIds.contains)) return;
+    setState(() {
+      _selectedIds.removeWhere((id) => !visibleIds.contains(id));
+      if (_selectedIds.isEmpty) _selectionMode = false;
+    });
+  }
+
+  void _pinSelected() {
+    final selected = _selectedBooks;
+    if (selected.isEmpty) return;
+    final pinned = selected.any((book) => !book.pinned);
+    final changed = _repository.setBooksPinned(selected, pinned);
+    if (changed == 0) return;
+    _toast(pinned ? '已置顶 $changed 本' : '已取消置顶 $changed 本');
+  }
+
   Future<void> _deleteSelected() async {
-    final selected = _repository.books
-        .where((book) => _selectedIds.contains(book.id))
-        .toList();
+    final selected = _selectedBooks;
     if (selected.isEmpty) {
       _exitSelection();
       return;
@@ -1314,9 +1356,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _markSelectedRead() {
-    final selected = _repository.books
-        .where((book) => _selectedIds.contains(book.id))
-        .toList();
+    final selected = _selectedBooks;
     if (selected.isEmpty) {
       _exitSelection();
       return;
@@ -1504,7 +1544,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.5.0'),
+              Text('版本 1.6.0'),
             ],
           ),
         ),
@@ -1522,7 +1562,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          margin: _selectionMode
+              ? EdgeInsets.fromLTRB(
+                  20,
+                  0,
+                  20,
+                  MediaQuery.paddingOf(context).bottom + 112,
+                )
+              : null,
+        ),
+      );
   }
 
   @override
@@ -1579,7 +1631,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   final countLabel = _hasActiveFilters
                       ? '${allVisible.length} / ${books.length}'
                       : '${visible.length}';
-                  final bottomPadding = _selectionMode ? 128.0 : 110.0;
+                  final bottomPadding = _selectionMode ? 168.0 : 110.0;
 
                   return CustomScrollView(
                     physics: const BouncingScrollPhysics(
@@ -1801,6 +1853,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   }
                                 },
                                 onMore: () => _showBookActions(book),
+                                onToggleFavorite: () => _toggleFavorite(book),
+                                onTogglePinned: () => _togglePinned(book),
                               );
                             }, childCount: visible.length),
                           ),
@@ -1841,6 +1895,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                     }
                                   },
                                   onMore: () => _showBookActions(book),
+                                  onToggleFavorite: () => _toggleFavorite(book),
+                                  onTogglePinned: () => _togglePinned(book),
                                 ),
                               );
                             }, childCount: visible.length),
@@ -1868,17 +1924,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: _SelectionBar(
-                  selectedCount: _selectedIds.length,
-                  allSelected:
-                      _selectedIds.isNotEmpty &&
-                      _selectedIds.length ==
-                          _visibleBooks(_repository.books).length,
-                  onClose: _exitSelection,
-                  onSelectAll: () =>
-                      _toggleSelectAll(_visibleBooks(_repository.books)),
-                  onMarkRead: _markSelectedRead,
-                  onDelete: _deleteSelected,
+                child: ListenableBuilder(
+                  listenable: _repository,
+                  builder: (context, _) {
+                    final selected = _repository.books
+                        .where((book) => _selectedIds.contains(book.id))
+                        .toList();
+                    return _SelectionBar(
+                      selectedCount: _selectedIds.length,
+                      allSelected:
+                          _selectedIds.isNotEmpty &&
+                          _selectedIds.length ==
+                              _visibleBooks(_repository.books).length,
+                      allFavorite:
+                          selected.isNotEmpty &&
+                          selected.every((book) => book.favorite),
+                      allPinned:
+                          selected.isNotEmpty &&
+                          selected.every((book) => book.pinned),
+                      onClose: _exitSelection,
+                      onSelectAll: () =>
+                          _toggleSelectAll(_visibleBooks(_repository.books)),
+                      onFavorite: _favoriteSelected,
+                      onPin: _pinSelected,
+                      onMarkRead: _markSelectedRead,
+                      onDelete: _deleteSelected,
+                    );
+                  },
                 ),
               ),
             if (_importing)
@@ -3011,6 +3083,170 @@ class _ContinueReadingCard extends StatelessWidget {
   }
 }
 
+class _CoverActionBar extends StatelessWidget {
+  const _CoverActionBar({
+    required this.book,
+    required this.onFavorite,
+    required this.onPinned,
+    required this.onMore,
+  });
+
+  final ComicBook book;
+  final VoidCallback onFavorite;
+  final VoidCallback onPinned;
+  final VoidCallback onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 34,
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.46),
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _CoverActionSegment(
+            icon: book.favorite
+                ? Icons.star_rounded
+                : Icons.star_border_rounded,
+            tooltip: book.favorite
+                ? '取消收藏《${book.title}》'
+                : '收藏《${book.title}》',
+            active: book.favorite,
+            onPressed: onFavorite,
+          ),
+          _CoverActionSegment(
+            icon: book.pinned
+                ? Icons.push_pin_rounded
+                : Icons.push_pin_outlined,
+            tooltip: book.pinned ? '取消置顶《${book.title}》' : '置顶《${book.title}》',
+            active: book.pinned,
+            onPressed: onPinned,
+          ),
+          _CoverActionSegment(
+            icon: Icons.more_horiz_rounded,
+            tooltip: '更多操作',
+            onPressed: onMore,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CoverActionSegment extends StatelessWidget {
+  const _CoverActionSegment({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: IconButton(
+        onPressed: onPressed,
+        tooltip: tooltip,
+        padding: EdgeInsets.zero,
+        style: IconButton.styleFrom(
+          fixedSize: const Size(32, 32),
+          minimumSize: const Size(32, 32),
+          maximumSize: const Size(32, 32),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        icon: Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: active
+                ? AppColors.accent.withValues(alpha: 0.18)
+                : Colors.transparent,
+          ),
+          child: Icon(
+            icon,
+            size: 17,
+            color: active ? AppColors.accent : Colors.white70,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickActionButton extends StatelessWidget {
+  const _QuickActionButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.active = false,
+    this.onDark = true,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final bool active;
+  final bool onDark;
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = active
+        ? (onDark ? const Color(0xFF2A1500) : AppColors.accent)
+        : (onDark ? Colors.white70 : AppColors.textSecondary);
+    final background = active
+        ? (onDark ? AppColors.accent : AppColors.accent.withValues(alpha: 0.12))
+        : (onDark ? Colors.black.withValues(alpha: 0.42) : Colors.transparent);
+
+    return Tooltip(
+      message: tooltip,
+      child: SizedBox(
+        width: 36,
+        height: 36,
+        child: IconButton(
+          onPressed: onPressed,
+          padding: EdgeInsets.zero,
+          style: IconButton.styleFrom(
+            fixedSize: const Size(36, 36),
+            minimumSize: const Size(36, 36),
+            maximumSize: const Size(36, 36),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: background,
+              border: active
+                  ? Border.all(
+                      color: onDark
+                          ? Colors.white.withValues(alpha: 0.28)
+                          : AppColors.accent.withValues(alpha: 0.35),
+                    )
+                  : null,
+            ),
+            child: Icon(icon, size: 17, color: foreground),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _BookCard extends StatelessWidget {
   const _BookCard({
     required this.book,
@@ -3020,6 +3256,8 @@ class _BookCard extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     required this.onMore,
+    required this.onToggleFavorite,
+    required this.onTogglePinned,
   });
 
   final ComicBook book;
@@ -3029,6 +3267,8 @@ class _BookCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onMore;
+  final VoidCallback onToggleFavorite;
+  final VoidCallback onTogglePinned;
 
   @override
   Widget build(BuildContext context) {
@@ -3048,115 +3288,81 @@ class _BookCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  BookCover(book: book, showProgress: true),
-                  if (missing)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(16),
-                            color: Colors.black.withValues(alpha: 0.48),
-                          ),
-                          child: Center(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  // Move the actions down when the cover is too narrow to
+                  // share the top edge with the format badge.
+                  // 封面过窄时把操作按钮移到底部，避免遮挡格式徽标。
+                  final compactActions = constraints.maxWidth < 156;
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      BookCover(book: book, showProgress: true),
+                      if (missing)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: DecoratedBox(
                               decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.55),
-                                borderRadius: BorderRadius.circular(6),
-                                border: Border.all(
-                                  color: const Color(0xFFE57373)
-                                      .withValues(alpha: 0.5),
-                                ),
+                                borderRadius: BorderRadius.circular(16),
+                                color: Colors.black.withValues(alpha: 0.48),
                               ),
-                              child: const Text(
-                                '文件丢失',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFFE57373),
+                              child: Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.55),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: const Color(0xFFE57373)
+                                          .withValues(alpha: 0.5),
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    '文件丢失',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFFE57373),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
-                  if (!selectionMode)
-                    Positioned(
-                      top: 0,
-                      right: 0,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: onMore,
-                        child: SizedBox(
-                          width: 40,
-                          height: 40,
-                          child: Center(
-                            child: Container(
-                              width: 28,
-                              height: 28,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: Colors.black.withValues(alpha: 0.42),
-                              ),
-                              child: const IgnorePointer(
-                                child: Icon(
-                                  Icons.more_horiz_rounded,
-                                  size: 17,
-                                  color: Colors.white70,
-                                ),
-                              ),
-                            ),
+                      if (!selectionMode)
+                        Positioned(
+                          top: compactActions ? null : 4,
+                          bottom: compactActions ? 8 : null,
+                          right: 4,
+                          child: _CoverActionBar(
+                            book: book,
+                            onFavorite: onToggleFavorite,
+                            onPinned: onTogglePinned,
+                            onMore: onMore,
                           ),
                         ),
-                      ),
-                    ),
-                  if (selectionMode)
-                    Positioned(
-                      top: 6,
-                      right: 6,
-                      child: _SelectionMark(selected: selected),
-                    ),
-                ],
+                      if (selectionMode)
+                        Positioned(
+                          top: 6,
+                          right: 6,
+                          child: _SelectionMark(selected: selected),
+                        ),
+                    ],
+                  );
+                },
               ),
             ),
             const SizedBox(height: 9),
-            Row(
-              children: [
-                if (book.pinned)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 3),
-                    child: Icon(
-                      Icons.push_pin_rounded,
-                      size: 11,
-                      color: AppColors.accent,
-                    ),
-                  ),
-                if (book.favorite)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 3),
-                    child: Icon(
-                      Icons.star_rounded,
-                      size: 12,
-                      color: AppColors.accent,
-                    ),
-                  ),
-                Expanded(
-                  child: Text(
-                    book.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium
-                        ?.copyWith(fontSize: 13.5, height: 1.2),
-                  ),
-                ),
-              ],
+            Text(
+              book.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleMedium
+                  ?.copyWith(fontSize: 13.5, height: 1.2),
             ),
             const SizedBox(height: 3),
             Text(
@@ -3189,6 +3395,8 @@ class _BookListItem extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     required this.onMore,
+    required this.onToggleFavorite,
+    required this.onTogglePinned,
   });
 
   final ComicBook book;
@@ -3198,6 +3406,8 @@ class _BookListItem extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onMore;
+  final VoidCallback onToggleFavorite;
+  final VoidCallback onTogglePinned;
 
   @override
   Widget build(BuildContext context) {
@@ -3229,24 +3439,6 @@ class _BookListItem extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        if (book.pinned)
-                          const Padding(
-                            padding: EdgeInsets.only(right: 3),
-                            child: Icon(
-                              Icons.push_pin_rounded,
-                              size: 11,
-                              color: AppColors.accent,
-                            ),
-                          ),
-                        if (book.favorite)
-                          const Padding(
-                            padding: EdgeInsets.only(right: 3),
-                            child: Icon(
-                              Icons.star_rounded,
-                              size: 12,
-                              color: AppColors.accent,
-                            ),
-                          ),
                         Expanded(
                           child: Text(
                             book.title,
@@ -3308,14 +3500,38 @@ class _BookListItem extends StatelessWidget {
               if (selectionMode)
                 _SelectionMark(selected: selected)
               else
-                IconButton(
-                  onPressed: onMore,
-                  tooltip: '更多操作',
-                  icon: const Icon(
-                    Icons.more_horiz_rounded,
-                    size: 20,
-                    color: AppColors.textSecondary,
-                  ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _QuickActionButton(
+                      icon: book.favorite
+                          ? Icons.star_rounded
+                          : Icons.star_border_rounded,
+                      tooltip: book.favorite
+                          ? '取消收藏《${book.title}》'
+                          : '收藏《${book.title}》',
+                      active: book.favorite,
+                      onDark: false,
+                      onPressed: onToggleFavorite,
+                    ),
+                    _QuickActionButton(
+                      icon: book.pinned
+                          ? Icons.push_pin_rounded
+                          : Icons.push_pin_outlined,
+                      tooltip: book.pinned
+                          ? '取消置顶《${book.title}》'
+                          : '置顶《${book.title}》',
+                      active: book.pinned,
+                      onDark: false,
+                      onPressed: onTogglePinned,
+                    ),
+                    _QuickActionButton(
+                      icon: Icons.more_horiz_rounded,
+                      tooltip: '更多操作',
+                      onDark: false,
+                      onPressed: onMore,
+                    ),
+                  ],
                 ),
             ],
           ),
@@ -3366,25 +3582,34 @@ class _SelectionBar extends StatelessWidget {
   const _SelectionBar({
     required this.selectedCount,
     required this.allSelected,
+    required this.allFavorite,
+    required this.allPinned,
     required this.onClose,
     required this.onSelectAll,
+    required this.onFavorite,
+    required this.onPin,
     required this.onMarkRead,
     required this.onDelete,
   });
 
   final int selectedCount;
   final bool allSelected;
+  final bool allFavorite;
+  final bool allPinned;
   final VoidCallback onClose;
   final VoidCallback onSelectAll;
+  final VoidCallback onFavorite;
+  final VoidCallback onPin;
   final VoidCallback onMarkRead;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
+    final hasSelection = selectedCount > 0;
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(10, 10, 12, 10),
+        padding: const EdgeInsets.fromLTRB(10, 6, 12, 10),
         decoration: BoxDecoration(
           color: AppColors.surfaceHigh,
           border: Border(
@@ -3398,85 +3623,176 @@ class _SelectionBar extends StatelessWidget {
             ),
           ],
         ),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              onPressed: onClose,
-              tooltip: '退出多选',
-              icon: const IgnorePointer(
-                child: Icon(Icons.close_rounded, size: 18),
-              ),
-              color: AppColors.textSecondary,
-              style: IconButton.styleFrom(
-                fixedSize: const Size(40, 40),
-                minimumSize: const Size(40, 40),
-                maximumSize: const Size(40, 40),
-                padding: EdgeInsets.zero,
-              ),
-            ),
-            Text(
-              '已选 $selectedCount 本',
-              style: const TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const Spacer(),
-            TextButton(
-              onPressed: onSelectAll,
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                minimumSize: const Size(0, 36),
-                visualDensity: VisualDensity.compact,
-                textStyle: const TextStyle(fontSize: 12.5),
-              ),
-              child: Text(allSelected ? '取消全选' : '全选'),
-            ),
-            const SizedBox(width: 2),
-            Tooltip(
-              message: '标记已读',
-              child: TextButton.icon(
-                onPressed: selectedCount == 0 ? null : onMarkRead,
-                icon: const IgnorePointer(
-                  child: Icon(Icons.done_all_rounded, size: 16),
-                ),
-                label: const Text('已读'),
-                style: TextButton.styleFrom(
-                  foregroundColor: AppColors.accent,
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minimumSize: const Size(0, 36),
-                  visualDensity: VisualDensity.compact,
-                  textStyle: const TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w500,
+            Row(
+              children: [
+                IconButton(
+                  onPressed: onClose,
+                  tooltip: '退出多选',
+                  icon: const IgnorePointer(
+                    child: Icon(Icons.close_rounded, size: 18),
+                  ),
+                  color: AppColors.textSecondary,
+                  style: IconButton.styleFrom(
+                    fixedSize: const Size(40, 40),
+                    minimumSize: const Size(40, 40),
+                    maximumSize: const Size(40, 40),
+                    padding: EdgeInsets.zero,
                   ),
                 ),
-              ),
+                Text(
+                  '已选 $selectedCount 本',
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                TextButton(
+                  onPressed: onSelectAll,
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    minimumSize: const Size(0, 36),
+                    visualDensity: VisualDensity.compact,
+                    textStyle: const TextStyle(fontSize: 12.5),
+                  ),
+                  child: Text(allSelected ? '取消全选' : '全选'),
+                ),
+              ],
             ),
-            const SizedBox(width: 2),
-            FilledButton.icon(
-              onPressed: selectedCount == 0 ? null : onDelete,
-              icon: const IgnorePointer(
-                child: Icon(Icons.delete_outline_rounded, size: 16),
-              ),
-              label: const Text('删除'),
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFFB3453F),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Expanded(
+                  child: _BatchActionButton(
+                    icon: allFavorite
+                        ? Icons.star_rounded
+                        : Icons.star_border_rounded,
+                    label: '收藏',
+                    tooltip: allFavorite ? '取消收藏选中的漫画' : '收藏选中的漫画',
+                    active: allFavorite,
+                    onPressed: hasSelection ? onFavorite : null,
+                  ),
                 ),
-                minimumSize: const Size(0, 36),
-                textStyle: const TextStyle(fontSize: 12.5),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _BatchActionButton(
+                    icon: allPinned
+                        ? Icons.push_pin_rounded
+                        : Icons.push_pin_outlined,
+                    label: '置顶',
+                    tooltip: allPinned ? '取消置顶选中的漫画' : '置顶选中的漫画',
+                    active: allPinned,
+                    onPressed: hasSelection ? onPin : null,
+                  ),
                 ),
-              ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _BatchActionButton(
+                    icon: Icons.done_all_rounded,
+                    label: '已读',
+                    tooltip: '标记已读',
+                    highlight: true,
+                    onPressed: hasSelection ? onMarkRead : null,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _BatchActionButton(
+                    icon: Icons.delete_outline_rounded,
+                    label: '删除',
+                    tooltip: '删除选中的漫画',
+                    danger: true,
+                    onPressed: hasSelection ? onDelete : null,
+                  ),
+                ),
+              ],
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _BatchActionButton extends StatelessWidget {
+  const _BatchActionButton({
+    required this.icon,
+    required this.label,
+    required this.tooltip,
+    required this.onPressed,
+    this.active = false,
+    this.highlight = false,
+    this.danger = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final bool active;
+  final bool highlight;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = danger
+        ? Colors.white
+        : active || highlight
+        ? AppColors.accent
+        : AppColors.textPrimary;
+    final style = danger
+        ? FilledButton.styleFrom(
+            backgroundColor: const Color(0xFFB3453F),
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            minimumSize: const Size(0, 36),
+            visualDensity: VisualDensity.compact,
+            textStyle: const TextStyle(fontSize: 12.5),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          )
+        : OutlinedButton.styleFrom(
+            foregroundColor: foreground,
+            backgroundColor: active
+                ? AppColors.accent.withValues(alpha: 0.10)
+                : null,
+            side: BorderSide(
+              color: active
+                  ? AppColors.accent.withValues(alpha: 0.55)
+                  : Colors.white.withValues(alpha: 0.12),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            minimumSize: const Size(0, 36),
+            visualDensity: VisualDensity.compact,
+            textStyle: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w500,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          );
+
+    final child = Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(icon, size: 16),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+      ],
+    );
+
+    return Tooltip(
+      message: tooltip,
+      child: danger
+          ? FilledButton(onPressed: onPressed, style: style, child: child)
+          : OutlinedButton(onPressed: onPressed, style: style, child: child),
     );
   }
 }

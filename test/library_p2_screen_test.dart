@@ -193,6 +193,39 @@ void main() {
     expect(find.text('海贼王 第2卷'), findsNothing);
   });
 
+  testWidgets(
+    'closes selection after unfavoriting under the favorites filter',
+    (tester) async {
+      final harness = await _pumpLibrary(tester);
+
+      await _openFilterSheet(tester);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text('只看收藏'),
+        ),
+      );
+      await tester.pump();
+      await _applyFilters(tester);
+      expect(find.text('海贼王 第1卷'), findsOneWidget);
+
+      await tester.longPress(find.text('海贼王 第1卷'));
+      await tester.pump();
+      expect(find.text('已选 1 本'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('取消收藏选中的漫画'));
+      await tester.pump();
+      expect(find.textContaining('已选'), findsNothing);
+      expect(find.text('海贼王 第1卷'), findsNothing);
+      final book = harness.repository.books.firstWhere(
+        (item) => item.id == 'one-piece-1',
+      );
+      expect(book.favorite, isFalse);
+
+      await tester.runAsync(harness.repository.flush);
+    },
+  );
+
   testWidgets('opens the merged series screen and volume list', (tester) async {
     await _pumpLibrary(tester);
 
@@ -297,6 +330,95 @@ void main() {
     );
     expect(book.pinned, isTrue);
     expect(harness.repository.books.first.id, 'one-piece-2');
+
+    await tester.runAsync(harness.repository.flush);
+  });
+
+  testWidgets('toggles favorite and pin from card and list quick actions', (
+    tester,
+  ) async {
+    final harness = await _pumpLibrary(tester);
+
+    await tester.tap(find.byTooltip('收藏《海贼王 第2卷》'));
+    await tester.pump();
+    var book = harness.repository.books.firstWhere(
+      (item) => item.id == 'one-piece-2',
+    );
+    expect(book.favorite, isTrue);
+    expect(find.byTooltip('取消收藏《海贼王 第2卷》'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('置顶《海贼王 第2卷》'));
+    await tester.pump();
+    book = harness.repository.books.firstWhere(
+      (item) => item.id == 'one-piece-2',
+    );
+    expect(book.pinned, isTrue);
+    expect(harness.repository.books.first.id, 'one-piece-2');
+
+    await tester.tap(find.byTooltip('切换为列表'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('收藏《日常》'));
+    await tester.pump();
+    book = harness.repository.books.firstWhere((item) => item.id == 'daily');
+    expect(book.favorite, isTrue);
+    expect(find.byTooltip('取消收藏《日常》'), findsOneWidget);
+
+    await tester.runAsync(harness.repository.flush);
+  });
+
+  testWidgets('batch favorites and pins selected books', (tester) async {
+    final harness = await _pumpLibrary(tester);
+
+    await tester.longPress(find.text('海贼王 第2卷'));
+    await tester.pump();
+    await tester.tap(find.text('日常'));
+    await tester.pump();
+    expect(find.text('已选 2 本'), findsOneWidget);
+
+    await tester.tap(find.text('收藏'));
+    await tester.pump();
+    var second = harness.repository.books.firstWhere(
+      (item) => item.id == 'one-piece-2',
+    );
+    var daily = harness.repository.books.firstWhere(
+      (item) => item.id == 'daily',
+    );
+    expect(second.favorite, isTrue);
+    expect(daily.favorite, isTrue);
+    expect(find.text('已收藏 2 本'), findsOneWidget);
+    expect(find.text('已选 2 本'), findsOneWidget);
+
+    await tester.tap(find.text('收藏'));
+    await tester.pump();
+    second = harness.repository.books.firstWhere(
+      (item) => item.id == 'one-piece-2',
+    );
+    daily = harness.repository.books.firstWhere((item) => item.id == 'daily');
+    expect(second.favorite, isFalse);
+    expect(daily.favorite, isFalse);
+    expect(
+      harness.repository.books
+          .firstWhere((item) => item.id == 'one-piece-1')
+          .favorite,
+      isTrue,
+    );
+
+    await tester.tap(find.text('置顶'));
+    await tester.pump();
+    expect(
+      harness.repository.books.take(2).every((book) => book.pinned),
+      isTrue,
+    );
+    expect(find.text('已置顶 2 本'), findsOneWidget);
+
+    await tester.tap(find.text('置顶'));
+    await tester.pump();
+    expect(harness.repository.books.any((book) => book.pinned), isFalse);
+    expect(find.text('已选 2 本'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('退出多选'));
+    await tester.pump();
+    expect(find.textContaining('已选'), findsNothing);
 
     await tester.runAsync(harness.repository.flush);
   });

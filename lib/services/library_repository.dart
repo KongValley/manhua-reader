@@ -1550,16 +1550,44 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   void toggleFavorite(ComicBook book) {
-    book.favorite = !book.favorite;
-    notifyListeners();
-    _scheduleSave();
+    setBooksFavorite([book], !book.favorite);
   }
 
   void togglePinned(ComicBook book) {
-    book.pinned = !book.pinned;
+    setBooksPinned([book], !book.pinned);
+  }
+
+  /// Sets the favorite flag for several books in one save.
+  /// 批量设置收藏状态，只触发一次通知和保存。
+  int setBooksFavorite(Iterable<ComicBook> books, bool favorite) {
+    final seen = <String>{};
+    var changed = 0;
+    for (final book in books) {
+      if (!seen.add(book.id) || book.favorite == favorite) continue;
+      book.favorite = favorite;
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _scheduleSave();
+    return changed;
+  }
+
+  /// Sets the pinned flag for several books and refreshes pinned ordering.
+  /// 批量设置置顶状态，并刷新置顶排序。
+  int setBooksPinned(Iterable<ComicBook> books, bool pinned) {
+    final seen = <String>{};
+    var changed = 0;
+    for (final book in books) {
+      if (!seen.add(book.id) || book.pinned == pinned) continue;
+      book.pinned = pinned;
+      changed++;
+    }
+    if (changed == 0) return 0;
     _sortBooks();
     notifyListeners();
     _scheduleSave();
+    return changed;
   }
 
   /// Updates the user-managed series and tags for one book.

@@ -131,6 +131,57 @@ void main() {
     reloaded.dispose();
   });
 
+  test('batch updates favorites and pinned ordering', () async {
+    final files = <File>[];
+    for (final id in ['first', 'second', 'third']) {
+      final file = File(p.join(paths.booksDir.path, '$id.pdf'));
+      await file.writeAsBytes([1]);
+      files.add(file);
+    }
+    await seedLibrary([
+      for (final (index, id) in ['first', 'second', 'third'].indexed)
+        _book(id: id, title: '第${index + 1}本', filePath: files[index].path),
+    ]);
+
+    final repository = LibraryRepository(paths);
+    await repository.load();
+    final first = repository.books.firstWhere((book) => book.id == 'first');
+    final second = repository.books.firstWhere((book) => book.id == 'second');
+    final third = repository.books.firstWhere((book) => book.id == 'third');
+
+    expect(repository.setBooksFavorite([first, first, second], true), 2);
+    expect(first.favorite, isTrue);
+    expect(second.favorite, isTrue);
+    expect(third.favorite, isFalse);
+    expect(repository.setBooksFavorite([first, second], true), 0);
+
+    expect(repository.setBooksPinned([third, first], true), 2);
+    expect(repository.books.take(2).every((book) => book.pinned), isTrue);
+    expect(third.pinned, isTrue);
+    expect(second.pinned, isFalse);
+    expect(repository.setBooksPinned([first, third], false), 2);
+    expect(repository.books.any((book) => book.pinned), isFalse);
+
+    await repository.flush();
+    repository.dispose();
+
+    final reloaded = LibraryRepository(paths);
+    await reloaded.load();
+    expect(
+      reloaded.books.firstWhere((book) => book.id == 'first').favorite,
+      isTrue,
+    );
+    expect(
+      reloaded.books.firstWhere((book) => book.id == 'second').favorite,
+      isTrue,
+    );
+    expect(
+      reloaded.books.firstWhere((book) => book.id == 'third').favorite,
+      isFalse,
+    );
+    reloaded.dispose();
+  });
+
   test('records forward reading pages and restores them', () async {
     final file = File(p.join(paths.booksDir.path, 'stats.pdf'));
     await file.writeAsBytes([1]);

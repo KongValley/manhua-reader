@@ -8,6 +8,7 @@ import 'package:manhua_reader/models/comic_book.dart';
 import 'package:manhua_reader/models/library_settings.dart';
 import 'package:manhua_reader/services/app_paths.dart';
 import 'package:manhua_reader/services/library_repository.dart';
+import 'package:manhua_reader/widgets/book_cover.dart';
 import 'package:path/path.dart' as p;
 
 class _Harness {
@@ -357,6 +358,25 @@ void main() {
     expect(find.text('应用内副本、封面与缓存'), findsOneWidget);
   });
 
+  testWidgets('keeps quick actions clear of the badge on narrow cards', (
+    tester,
+  ) async {
+    await _pumpLibrary(tester, size: const Size(320, 800));
+
+    final title = find.text('完结篇').last;
+    final card = find.ancestor(of: title, matching: find.byType(InkWell)).first;
+    final badge = find.descendant(of: card, matching: find.byType(FormatBadge));
+    final favorite = find.descendant(
+      of: card,
+      matching: find.byTooltip('收藏《完结篇》'),
+    );
+
+    final badgeRect = tester.getRect(badge);
+    final actionRect = tester.getRect(favorite);
+    expect(actionRect.overlaps(badgeRect), isFalse);
+    expect(actionRect.top, greaterThanOrEqualTo(badgeRect.bottom));
+  });
+
   testWidgets('fits the selection bar on a narrow phone', (tester) async {
     await _pumpLibrary(tester, size: const Size(360, 800));
 
@@ -365,6 +385,8 @@ void main() {
 
     expect(find.text('已选 1 本'), findsOneWidget);
     expect(find.text('全选'), findsOneWidget);
+    expect(find.text('收藏'), findsOneWidget);
+    expect(find.text('置顶'), findsOneWidget);
     expect(find.text('已读'), findsOneWidget);
     expect(find.text('删除'), findsOneWidget);
   });
