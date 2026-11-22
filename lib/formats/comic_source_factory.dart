@@ -3,16 +3,33 @@ import 'dart:io';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../models/comic_book.dart';
+import 'album/album_store.dart';
+import 'album_comic_source.dart';
+import 'archive_comic_source.dart';
 import 'comic_source.dart';
 import 'mobi/mobi_book.dart';
 import 'mobi_comic_source.dart';
 import 'pdf_comic_source.dart';
+import 'zip/zip_archive_reader.dart';
 
 class ComicSourceFactory {
   static Future<ComicSource> open(
     ComicBook book, {
     PdfPasswordProvider? passwordProvider,
+    AlbumSortField? albumSort,
+    bool? albumSortDescending,
   }) async {
+    if (book.format == ComicFormat.album) {
+      try {
+        return await AlbumComicSource.open(
+          book.filePath,
+          sort: albumSort ?? book.albumSort,
+          descending: albumSortDescending ?? book.albumSortDescending,
+        );
+      } on AlbumSourceException catch (error) {
+        throw ComicOpenException(error.message);
+      }
+    }
     if (!await File(book.filePath).exists()) {
       throw ComicOpenException('漫画文件已丢失，请重新导入');
     }
@@ -34,9 +51,21 @@ class ComicSourceFactory {
             fallbackTitle: book.title,
           );
           return MobiComicSource(mobi);
+        case ComicFormat.cbz:
+          return await ArchiveComicSource.open(book.filePath);
+        case ComicFormat.album:
+          return await AlbumComicSource.open(
+            book.filePath,
+            sort: albumSort ?? book.albumSort,
+            descending: albumSortDescending ?? book.albumSortDescending,
+          );
       }
     } on ComicOpenException {
       rethrow;
+    } on AlbumSourceException catch (error) {
+      throw ComicOpenException(error.message);
+    } on ZipArchiveException catch (error) {
+      throw ComicOpenException(error.message);
     } on MobiException catch (error) {
       throw ComicOpenException(error.message);
     } on PdfPasswordException catch (error) {

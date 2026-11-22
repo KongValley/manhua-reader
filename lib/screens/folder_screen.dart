@@ -3,10 +3,10 @@ import 'package:flutter/material.dart';
 import '../models/comic_book.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
+import '../utils/book_navigation.dart';
 import '../utils/format.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/folder_name_dialog.dart';
-import 'reader_screen.dart';
 
 class FolderScreen extends StatelessWidget {
   const FolderScreen({
@@ -156,13 +156,10 @@ class FolderScreen extends StatelessWidget {
                             );
                           return;
                         }
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (context) => ReaderScreen(
-                              book: book,
-                              repository: repository,
-                            ),
-                          ),
+                        openComicBook(
+                          context,
+                          book: book,
+                          repository: repository,
                         );
                       },
                     );

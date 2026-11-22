@@ -13,8 +13,10 @@ import '../models/library_settings.dart';
 import '../services/folder_import.dart';
 import '../services/library_repository.dart';
 import '../services/pdf_password_cache.dart';
+import '../services/saf_album_service.dart';
 import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/book_navigation.dart';
 import '../utils/format.dart';
 import '../widgets/backup_sheet.dart';
 import '../widgets/book_cover.dart';
@@ -25,7 +27,6 @@ import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reading_progress_bar.dart';
 import '../widgets/reading_stats_sheet.dart';
 import 'folder_screen.dart';
-import 'reader_screen.dart';
 import 'series_screen.dart';
 
 class _ImportCandidate {
@@ -342,7 +343,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       files = await FilePicker.pickFiles(
         dialogTitle: '选择漫画文件',
         type: FileType.custom,
-        allowedExtensions: const ['pdf', 'mobi'],
+        allowedExtensions: ComicFormat.allExtensions,
       );
     } catch (error) {
       _toast('无法打开文件选择器：$error');
@@ -383,15 +384,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.insert_drive_file_outlined),
                 title: const Text('选择文件'),
-                subtitle: const Text('可多选 PDF / MOBI'),
+                subtitle: const Text('可多选 PDF / MOBI / CBZ'),
                 onTap: () => Navigator.of(context).pop('files'),
               ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.create_new_folder_outlined),
                 title: const Text('选择文件夹'),
-                subtitle: const Text('递归导入文件夹中的 PDF / MOBI'),
+                subtitle: const Text('递归导入文件夹中的 PDF / MOBI / CBZ'),
                 onTap: () => Navigator.of(context).pop('folder'),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('导入图片相册'),
+                subtitle: const Text('引用 JPG / PNG 文件夹，不复制图片'),
+                onTap: () => Navigator.of(context).pop('album'),
               ),
               if (_supportsDesktopDrop)
                 const Padding(
@@ -412,9 +420,78 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (!mounted || choice == null) return;
     if (choice == 'files') {
       await _pickAndImport();
+    } else if (choice == 'album') {
+      await _pickAlbumAndImport();
     } else {
       await _pickFolderAndImport();
     }
+  }
+
+  Future<void> _pickAlbumAndImport() async {
+    if (_importing) return;
+    Directory? directory;
+    String? treeUri;
+    String name;
+    try {
+      if (SafAlbumService.isSupported) {
+        treeUri = await SafFolderService.pickDirectory();
+        if (treeUri == null) return;
+        name = await SafFolderService.directoryName(treeUri);
+      } else {
+        final uri = await FilePicker.pickDirectory(dialogTitle: '选择图片相册文件夹');
+        if (uri == null) return;
+        if (uri.scheme != 'file') {
+          _toast('当前平台无法直接读取该文件夹');
+          return;
+        }
+        directory = Directory(uri.toFilePath());
+        name = p.basename(directory.path);
+      }
+    } catch (error) {
+      _toast('无法打开文件夹选择器：$error');
+      return;
+    }
+    if (!mounted) return;
+
+    setState(() {
+      _importing = true;
+      _importLabel = '正在扫描相册';
+      _importProgress = 0;
+    });
+    try {
+      final book = directory != null
+          ? await _repository.importAlbumDirectory(
+              directory,
+              onProgress: _updateAlbumProgress,
+            )
+          : await _repository.importSafAlbum(
+              treeUri: treeUri!,
+              name: name,
+              onProgress: _updateAlbumProgress,
+            );
+      if (!mounted) return;
+      _toast('已添加相册《${book.title}》，共 ${book.pageCount} 张');
+    } on ImportException catch (error) {
+      if (mounted) _toast(error.message);
+    } catch (error) {
+      if (mounted) _toast('无法导入相册：$error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _importing = false;
+          _importLabel = '';
+          _importProgress = 0;
+        });
+      }
+    }
+  }
+
+  void _updateAlbumProgress(String label, double value) {
+    if (!mounted) return;
+    setState(() {
+      _importLabel = label;
+      _importProgress = value;
+    });
   }
 
   Future<void> _pickFolderAndImport() async {
@@ -434,7 +511,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
       if (!mounted) return;
       if (files.isEmpty) {
-        _toast('文件夹里没有找到 PDF / MOBI');
+        _toast('文件夹里没有漫画文件；如需浏览图片，请用「导入图片相册」');
         return;
       }
       final folder = _repository.ensureFolder(folderName);
@@ -469,7 +546,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     if (!mounted) return;
     if (files.isEmpty) {
-      _toast('文件夹里没有找到 PDF / MOBI');
+      _toast('文件夹里没有漫画文件；如需浏览图片，请用「导入图片相册」');
       return;
     }
     final folderName = p.basename(directory.path).trim();
@@ -532,7 +609,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     if (!mounted) return;
     if (candidates.isEmpty) {
-      _toast('拖入的内容里没有 PDF / MOBI');
+      _toast('拖入的内容里没有漫画文件；图片文件夹请用「导入图片相册」');
       return;
     }
     await _runImportCandidates(candidates);
@@ -703,7 +780,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
-  Future<void> _openBook(ComicBook book) async {
+  Future<void> _openBook(ComicBook book, {bool continueReading = false}) async {
     if (_selectionMode) {
       _toggleSelection(book);
       return;
@@ -712,10 +789,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _showBookActions(book);
       return;
     }
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (context) => ReaderScreen(book: book, repository: _repository),
-      ),
+    await openComicBook(
+      context,
+      book: book,
+      repository: _repository,
+      page: continueReading ? book.safeLastPage : null,
     );
   }
 
@@ -783,18 +861,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         color: const Color(0xFFE57373).withValues(alpha: 0.22),
                       ),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
-                        Icon(
+                        const Icon(
                           Icons.folder_off_outlined,
                           size: 18,
                           color: Color(0xFFE57373),
                         ),
-                        SizedBox(width: 8),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            '文件已丢失。可以重新定位一个 PDF/MOBI 文件，或删除此条目。',
-                            style: TextStyle(
+                            book.format.isAlbum
+                                ? '相册文件夹不可用。可以重新选择文件夹，或从书架移除；不会删除原图片。'
+                                : '文件已丢失。可以重新定位一个 PDF/MOBI/CBZ 文件，或删除此条目。',
+                            style: const TextStyle(
                               fontSize: 12,
                               height: 1.5,
                               color: Color(0xFFE57373),
@@ -897,8 +977,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.folder_open_rounded),
-                    title: const Text('重新定位文件'),
-                    subtitle: const Text('选择一个替换文件，保留阅读进度和书签'),
+                    title: Text(book.format.isAlbum ? '重新选择相册文件夹' : '重新定位文件'),
+                    subtitle: Text(
+                      book.format.isAlbum
+                          ? '选择新的图片文件夹，保留阅读进度和书签'
+                          : '选择一个替换文件，保留阅读进度和书签',
+                    ),
                     onTap: () => Navigator.of(context).pop('relink'),
                   )
                 else ...[
@@ -929,7 +1013,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     '删除漫画',
                     style: TextStyle(color: Color(0xFFE57373)),
                   ),
-                  subtitle: const Text('只删除应用内的副本，不影响原文件'),
+                  subtitle: Text(
+                    book.format.isAlbum
+                        ? '只从书架移除，不会删除原文件夹中的图片'
+                        : '只删除应用内的副本，不影响原文件',
+                  ),
                   onTap: () => Navigator.of(context).pop('delete'),
                 ),
               ],
@@ -954,7 +1042,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       case 'organize':
         await _showOrganizationDialog(book);
       case 'relink':
-        await _relinkBook(book);
+        if (book.format.isAlbum) {
+          await _relinkAlbum(book);
+        } else {
+          await _relinkBook(book);
+        }
       case 'customCover':
         await _pickCustomCover(book);
       case 'cover':
@@ -1068,7 +1160,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       picked = await FilePicker.pickFile(
         dialogTitle: '选择用于替换的 ${book.format.label} 文件',
         type: FileType.custom,
-        allowedExtensions: [book.format.extension],
+        allowedExtensions: book.format.extensions,
       );
     } catch (error) {
       _toast('无法打开文件选择器：$error');
@@ -1158,6 +1250,43 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _relinkAlbum(ComicBook book) async {
+    String? source;
+    try {
+      if (SafAlbumService.isSupported) {
+        source = await SafFolderService.pickDirectory();
+      } else {
+        final uri = await FilePicker.pickDirectory(dialogTitle: '选择新的图片文件夹');
+        if (uri == null) return;
+        if (uri.scheme != 'file') {
+          _toast('当前平台无法直接读取该文件夹');
+          return;
+        }
+        source = uri.toFilePath();
+      }
+    } catch (error) {
+      _toast('无法打开文件夹选择器：$error');
+      return;
+    }
+    if (source == null || !mounted) return;
+    final nextSource = source;
+    try {
+      await _runWithProgress<ComicBook>(
+        '正在重新定位相册…',
+        (onProgress) => _repository.relinkAlbum(
+          book,
+          source: nextSource,
+          onProgress: onProgress,
+        ),
+      );
+      if (mounted) _toast('已重新定位《${book.title}》');
+    } on ImportException catch (error) {
+      if (mounted) _toast(error.message);
+    } catch (error) {
+      if (mounted) _toast('重新定位失败：$error');
+    }
+  }
+
   Future<void> _deleteBook(ComicBook book) async {
     final confirmed = await _confirmDelete(1);
     if (confirmed != true || !mounted) return;
@@ -1206,7 +1335,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
-        content: const Text('应用内副本、封面及相关缓存会被删除。导入时复制到应用内的文件会一并清理，原文件不受影响。'),
+        content: const Text(
+          '普通漫画只删除应用内副本、封面及相关缓存；引用型相册只移除书架条目，不会删除原文件夹。原文件均不受影响。',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -1363,16 +1494,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
             children: [
               Text('为手机与平板打造的本地漫画阅读器。'),
               SizedBox(height: 12),
-              Text('· 支持 PDF 与 MOBI（漫画型电子书）'),
+              Text('· 支持 PDF / MOBI / CBZ 与图片相册'),
               Text('· 横向翻页 / 纵向滚动，双击可放大'),
               Text('· 目录、书签（名称/备注）、缩略图导航'),
               Text('· 双页模式、加密 PDF 解锁'),
+              Text('· 屏幕常亮、亮度滤镜、自动翻页与音量键翻页'),
               Text('· 搜索筛选、批量管理、系列与标签'),
               Text('· 文件夹导入与重命名、阅读统计、备份'),
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.3.0'),
+              Text('版本 1.5.0'),
             ],
           ),
         ),
@@ -1504,7 +1636,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
                             child: _ContinueReadingCard(
                               book: lastRead,
-                              onTap: () => _openBook(lastRead),
+                              onTap: () =>
+                                  _openBook(lastRead, continueReading: true),
                             ),
                           ),
                         ),
@@ -1888,24 +2021,30 @@ class _Header extends StatelessWidget {
                         ?.copyWith(fontSize: 26),
                   ),
                   const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [AppColors.accent, AppColors.accentDeep],
-                      ),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Text(
-                      'PDF · MOBI',
-                      style: TextStyle(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF2A1500),
-                        letterSpacing: 0.4,
+                  Flexible(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [AppColors.accent, AppColors.accentDeep],
+                          ),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Text(
+                          'PDF · MOBI · CBZ',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF2A1500),
+                            letterSpacing: 0.4,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -3577,7 +3716,7 @@ class _DropOverlay extends StatelessWidget {
                   ),
                   SizedBox(height: 6),
                   Text(
-                    '支持 PDF / MOBI 文件或文件夹',
+                    '支持 PDF / MOBI / CBZ 文件或文件夹',
                     style: TextStyle(
                       fontSize: 12,
                       color: AppColors.textSecondary,

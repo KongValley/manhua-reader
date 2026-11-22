@@ -306,7 +306,7 @@ class _BackupSheetState extends State<BackupSheet> {
                 icon: Icons.folder_zip_rounded,
                 color: AppColors.accent,
                 title: '导出完整备份',
-                subtitle: 'ZIP · 包含漫画文件与封面，体积较大',
+                subtitle: 'ZIP · 包含导入的漫画文件与封面；引用型相册只保存书架信息',
                 enabled: !_busy,
                 onTap: _exportArchive,
               ),
@@ -341,7 +341,8 @@ class _BackupSheetState extends State<BackupSheet> {
               const SizedBox(height: 14),
               const Text(
                 '仅 JSON 备份恢复后，若本机没有对应漫画文件，书籍会显示“文件丢失”，'
-                '可逐本重新定位；完整备份会同时恢复文件和封面。',
+                '可逐本重新定位；完整备份会恢复导入的文件和封面，引用型相册只恢复书架条目，'
+                '图片仍保存在原文件夹。',
                 style: TextStyle(
                   fontSize: 10.5,
                   height: 1.6,

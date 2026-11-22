@@ -3,9 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// One PDF/MOBI document discovered through Android's Storage Access
-/// Framework.
-/// 通过 Android Storage Access Framework 发现的一个 PDF/MOBI 文档。
+/// One comic document discovered through Android's Storage Access Framework.
+/// 通过 Android Storage Access Framework 发现的一个漫画文档。
 class SafFile {
   const SafFile({required this.uri, required this.name, this.size});
 

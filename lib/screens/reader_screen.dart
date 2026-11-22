@@ -11,7 +11,10 @@ import '../models/reader_settings.dart';
 import '../models/toc_entry.dart';
 import '../services/library_repository.dart';
 import '../services/pdf_password_cache.dart';
+import '../services/screen_awake.dart';
+import '../services/volume_keys.dart';
 import '../theme/app_theme.dart';
+import '../utils/auto_turn.dart';
 import '../utils/format.dart';
 import '../utils/pagination.dart';
 import '../widgets/book_cover.dart';
@@ -19,12 +22,19 @@ import '../widgets/bookmark_editor_dialog.dart';
 import '../widgets/paper_page_view.dart';
 import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reader_navigation_sheet.dart';
+import '../widgets/reader_settings_sheet.dart';
 
 class ReaderScreen extends StatefulWidget {
-  const ReaderScreen({required this.book, required this.repository, super.key});
+  const ReaderScreen({
+    required this.book,
+    required this.repository,
+    this.initialPage,
+    super.key,
+  });
 
   final ComicBook book;
   final LibraryRepository repository;
+  final int? initialPage;
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
@@ -56,6 +66,14 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _sliderActive = false;
   Timer? _hideTimer;
   Timer? _persistTimer;
+  late final AutoTurnController _autoTurn;
+  late bool _keepAwake;
+  late double _brightness;
+  late double _warmth;
+  late int _autoTurnSeconds;
+  late bool _volumeKeys;
+  late PageTurnAnimation _pageTurnAnimation;
+  bool _appActive = true;
 
   LibraryRepository get _repository => widget.repository;
   ComicBook get _book => widget.book;
@@ -67,8 +85,21 @@ class _ReaderScreenState extends State<ReaderScreen>
     _mode = _repository.settings.mode;
     _rightToLeft = _repository.settings.rightToLeft;
     _doublePage = _repository.settings.doublePage;
-    _currentPage = _book.safeLastPage;
+    _keepAwake = _repository.settings.keepAwake;
+    _brightness = _repository.settings.brightness;
+    _warmth = _repository.settings.warmth;
+    _autoTurnSeconds = _repository.settings.autoTurnSeconds;
+    _volumeKeys = _repository.settings.volumeKeys;
+    _pageTurnAnimation = _repository.settings.pageTurnAnimation;
+    _currentPage = widget.initialPage ?? _book.safeLastPage;
+    _autoTurn = AutoTurnController(
+      onTurn: _autoTurnPage,
+      canTurn: _canAutoTurn,
+    );
     _enterImmersiveMode();
+    _applyKeepAwake();
+    VolumeKeys.listen(onNext: _volumeNextPage, onPrevious: _volumePreviousPage);
+    _applyVolumeKeys();
     _loadSource();
   }
 
@@ -122,6 +153,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _loading = false;
       });
       _repository.updateProgress(_book, _currentPage);
+      _scheduleAutoTurn();
       _scheduleChromeHide();
     } catch (error) {
       if (!mounted) return;
@@ -193,11 +225,61 @@ class _ReaderScreenState extends State<ReaderScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
+      _appActive = false;
+      _autoTurn.setActive(false);
+      unawaited(ScreenAwake.setEnabled(false));
       _persistProgressNow();
       unawaited(_repository.flush());
     } else if (state == AppLifecycleState.resumed) {
+      _appActive = true;
       _enterImmersiveMode();
+      _applyKeepAwake();
+      _autoTurn.setActive(true);
+      _scheduleAutoTurn();
     }
+  }
+
+  void _applyKeepAwake() {
+    unawaited(ScreenAwake.setEnabled(_appActive && _keepAwake));
+  }
+
+  void _applyVolumeKeys() {
+    unawaited(VolumeKeys.setEnabled(_volumeKeys && VolumeKeys.isSupported));
+  }
+
+  void _volumeNextPage() {
+    if (!_appActive || !_canAutoTurn() || _pageCount <= 0) return;
+    _goNext(revealChrome: true);
+  }
+
+  void _volumePreviousPage() {
+    if (!_appActive || !_canAutoTurn() || _pageCount <= 0) return;
+    _goPrevious(revealChrome: true);
+  }
+
+  /// Schedules a single automatic page turn after the configured delay.
+  /// 按设定间隔安排下一次自动翻页。
+  void _scheduleAutoTurn() {
+    _autoTurn.configure(
+      _autoTurnSeconds <= 0 || _pageCount <= 1
+          ? null
+          : Duration(seconds: _autoTurnSeconds),
+    );
+  }
+
+  bool _canAutoTurn() {
+    final route = ModalRoute.of(context);
+    return route == null || route.isCurrent;
+  }
+
+  bool _autoTurnPage() {
+    if (!mounted || _pageCount <= 1) return false;
+    if (_visibleSpread.last >= _pageCount - 1) {
+      _showReaderNotice('已到最后一页，自动翻页已停止');
+      return false;
+    }
+    _goNext();
+    return true;
   }
 
   void _scheduleChromeHide() {
@@ -230,6 +312,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     setState(() => _currentPage = page);
     _persistProgressSoon();
     _scheduleChromeHide();
+    _scheduleAutoTurn();
   }
 
   void _handleSpreadChanged(int index) {
@@ -239,6 +322,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     setState(() => _currentPage = spread.first);
     _persistProgressSoon();
     _scheduleChromeHide();
+    _scheduleAutoTurn();
   }
 
   void _persistProgressSoon() {
@@ -353,9 +437,15 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _toggleMode() {
-    final next = _mode == ReadingMode.horizontal
-        ? ReadingMode.vertical
-        : ReadingMode.horizontal;
+    _setMode(
+      _mode == ReadingMode.horizontal
+          ? ReadingMode.vertical
+          : ReadingMode.horizontal,
+    );
+  }
+
+  void _setMode(ReadingMode next) {
+    if (next == _mode) return;
     _repository.setReadingMode(next);
     final oldVertical = _verticalController;
     final oldPage = _pageController;
@@ -374,13 +464,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     _disposeLater(oldPage);
     _disposeLater(oldVertical);
     _keepChromeVisible();
+    _scheduleAutoTurn();
   }
 
-  void _toggleDirection() {
-    _repository.setRightToLeft(!_rightToLeft);
+  void _toggleDirection() => _setRightToLeft(!_rightToLeft);
+
+  void _setRightToLeft(bool value) {
+    if (value == _rightToLeft) return;
+    _repository.setRightToLeft(value);
     final old = _pageController;
     setState(() {
-      _rightToLeft = !_rightToLeft;
+      _rightToLeft = value;
       _pendingHorizontalPage = null;
       _pageController = _startingPageController();
     });
@@ -390,7 +484,18 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _toggleDoublePage() {
     if (_pageCount <= 1) return;
-    final next = !_doublePage;
+    _setDoublePage(!_doublePage);
+    if (!_doublePage) {
+      _showReaderNotice('双页模式已关闭');
+    } else if (MediaQuery.sizeOf(context).width < 600) {
+      _showReaderNotice('双页模式已开启（横屏效果更好）');
+    } else {
+      _showReaderNotice('双页模式已开启');
+    }
+  }
+
+  void _setDoublePage(bool next) {
+    if (_pageCount <= 1 || next == _doublePage) return;
     _repository.setDoublePage(next);
     final oldPage = _pageController;
     final oldVertical = _verticalController;
@@ -409,13 +514,61 @@ class _ReaderScreenState extends State<ReaderScreen>
     _disposeLater(oldPage);
     _disposeLater(oldVertical);
     _keepChromeVisible();
-    if (!next) {
-      _showReaderNotice('双页模式已关闭');
-    } else if (MediaQuery.sizeOf(context).width < 600) {
-      _showReaderNotice('双页模式已开启（横屏效果更好）');
-    } else {
-      _showReaderNotice('双页模式已开启');
-    }
+    _scheduleAutoTurn();
+  }
+
+  Future<void> _openReaderSettings() async {
+    _keepChromeVisible();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ReaderSettingsSheet(
+        mode: _mode,
+        rightToLeft: _rightToLeft,
+        doublePage: _doublePage,
+        keepAwake: _keepAwake,
+        brightness: _brightness,
+        warmth: _warmth,
+        autoTurnSeconds: _autoTurnSeconds,
+        volumeKeys: _volumeKeys,
+        pageTurnAnimation: _pageTurnAnimation,
+        isAndroid: Theme.of(context).platform == TargetPlatform.android,
+        onModeChanged: _setMode,
+        onRightToLeftChanged: _setRightToLeft,
+        onDoublePageChanged: _setDoublePage,
+        onKeepAwakeChanged: (value) {
+          setState(() => _keepAwake = value);
+          _repository.setKeepAwake(value);
+          _applyKeepAwake();
+        },
+        onBrightnessChanged: (value) {
+          setState(() => _brightness = value);
+          _repository.setReaderBrightness(value);
+        },
+        onWarmthChanged: (value) {
+          setState(() => _warmth = value);
+          _repository.setReaderWarmth(value);
+        },
+        onAutoTurnChanged: (value) {
+          setState(() => _autoTurnSeconds = value);
+          _repository.setAutoTurnSeconds(value);
+          _scheduleAutoTurn();
+        },
+        onVolumeKeysChanged: (value) {
+          setState(() => _volumeKeys = value);
+          _repository.setVolumeKeys(value);
+          _applyVolumeKeys();
+        },
+        onPageTurnAnimationChanged: (value) {
+          setState(() => _pageTurnAnimation = value);
+          _repository.setPageTurnAnimation(value);
+        },
+      ),
+    );
+    if (!mounted) return;
+    _keepChromeVisible();
+    _scheduleAutoTurn();
   }
 
   void _toggleBookmark() {
@@ -604,6 +757,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _persistTimer?.cancel();
+    _autoTurn.dispose();
+    VolumeKeys.stop();
+    unawaited(VolumeKeys.setEnabled(false));
+    unawaited(ScreenAwake.setEnabled(false));
     _persistProgressNow();
     unawaited(_repository.flush());
     _pageController?.dispose();
@@ -659,7 +816,33 @@ class _ReaderScreenState extends State<ReaderScreen>
           backgroundColor: AppColors.readerBackground,
           body: Stack(
             children: [
-              Positioned.fill(child: _buildPages(source)),
+              Positioned.fill(
+                child: Listener(
+                  onPointerDown: (_) => _scheduleAutoTurn(),
+                  child: _buildPages(source),
+                ),
+              ),
+              if (_brightness < 0.999 || _warmth > 0)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (_brightness < 0.999)
+                          ColoredBox(
+                            color: Colors.black.withValues(
+                              alpha: 1 - _brightness,
+                            ),
+                          ),
+                        if (_warmth > 0)
+                          ColoredBox(
+                            color: const Color(0xFFFFB46A)
+                                .withValues(alpha: _warmth),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               _buildTopBar(),
               _buildBottomBar(),
             ],
@@ -680,6 +863,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         rightToLeft: _rightToLeft,
         spreads: _usesSpreads ? _spreads : null,
         background: AppColors.readerBackground,
+        paperAnimation: _pageTurnAnimation == PageTurnAnimation.paper,
         onSettled: _handleHorizontalSettled,
         wrapPage: (child, onZoomChanged) => _ZoomablePage(
           onTap: _toggleChrome,
@@ -843,6 +1027,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                           ),
                           tooltip: _rightToLeft ? '从右向左阅读' : '从左向右阅读',
                         ),
+                      IconButton(
+                        onPressed: _openReaderSettings,
+                        icon: const Icon(Icons.tune_rounded, size: 22),
+                        tooltip: '阅读设置',
+                      ),
                       const SizedBox(width: 4),
                     ],
                   ),

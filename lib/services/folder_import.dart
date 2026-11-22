@@ -4,8 +4,8 @@ import 'package:path/path.dart' as p;
 
 import '../models/comic_book.dart';
 
-/// Scans folders / dropped paths for importable PDF and MOBI files.
-/// 扫描文件夹 / 拖拽路径中的可导入 PDF 与 MOBI 文件。
+/// Scans folders / dropped paths for importable comic files.
+/// 扫描文件夹 / 拖拽路径中的可导入漫画文件。
 class FolderImportScanner {
   static const int defaultMaxFiles = 1000;
 

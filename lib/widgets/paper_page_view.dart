@@ -17,6 +17,7 @@ class PaperPageView extends StatefulWidget {
     required this.wrapPage,
     required this.onSettled,
     this.spreads,
+    this.paperAnimation = true,
     super.key,
   });
 
@@ -25,6 +26,7 @@ class PaperPageView extends StatefulWidget {
   final bool rightToLeft;
   final Color background;
   final List<List<int>>? spreads;
+  final bool paperAnimation;
   final Widget Function(Widget child, ValueChanged<bool> onZoomChanged)
   wrapPage;
   final ValueChanged<int> onSettled;
@@ -164,7 +166,8 @@ class _PaperPageViewState extends State<PaperPageView> {
 
   @override
   Widget build(BuildContext context) {
-    final animated = !MediaQuery.disableAnimationsOf(context);
+    final animated =
+        widget.paperAnimation && !MediaQuery.disableAnimationsOf(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final pages = NotificationListener<ScrollNotification>(

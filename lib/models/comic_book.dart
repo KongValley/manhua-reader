@@ -1,23 +1,56 @@
 import 'bookmark.dart';
 
-enum ComicFormat {
-  pdf('PDF', 'pdf'),
-  mobi('MOBI', 'mobi');
+enum AlbumSortField {
+  name('名称'),
+  created('创建时间'),
+  modified('修改时间');
 
-  const ComicFormat(this.label, this.extension);
+  const AlbumSortField(this.label);
+
+  final String label;
+
+  static AlbumSortField fromName(String name) {
+    for (final field in values) {
+      if (field.name == name) return field;
+    }
+    return AlbumSortField.name;
+  }
+}
+
+enum ComicFormat {
+  pdf('PDF', ['pdf']),
+  mobi('MOBI', ['mobi']),
+  cbz('CBZ', ['cbz']),
+  album('相册', []);
+
+  const ComicFormat(this.label, this.extensions);
 
   /// Short label shown in the UI.
   /// UI 中显示的短标签。
   final String label;
 
-  /// Lower-case file extension.
-  /// 小写文件扩展名。
-  final String extension;
+  /// Accepted lower-case file extensions, with the primary one first.
+  /// 接受的小写扩展名，第一个为主扩展名。
+  final List<String> extensions;
+
+  /// Primary extension used when a new copy has no usable original name.
+  /// 新副本没有可用原名时使用的主扩展名；相册没有扩展名。
+  String get extension => extensions.isEmpty ? name : extensions.first;
+
+  /// Whether this entry references an external image folder.
+  /// 是否为引用外部图片文件夹的相册。
+  bool get isAlbum => this == album;
+
+  /// Every importable extension, used by file pickers and scanners.
+  /// 所有可导入扩展名，供文件选择器和扫描器使用。
+  static List<String> get allExtensions => [
+    for (final format in values) ...format.extensions,
+  ];
 
   static ComicFormat? fromExtension(String extension) {
     final normalized = extension.toLowerCase().replaceFirst('.', '');
     for (final format in values) {
-      if (format.extension == normalized) return format;
+      if (format.extensions.contains(normalized)) return format;
     }
     return null;
   }
@@ -51,6 +84,8 @@ class ComicBook {
     List<String>? tags,
     this.folderId,
     this.customCover = false,
+    this.albumSort = AlbumSortField.name,
+    this.albumSortDescending = false,
     List<Bookmark>? bookmarks,
   }) : bookmarks = bookmarks ?? <Bookmark>[],
        tags = tags ?? <String>[];
@@ -114,6 +149,14 @@ class ComicBook {
   /// 用于筛选的自由标签。
   List<String> tags;
 
+  /// Page order used by referenced image albums.
+  /// 引用型图片相册使用的页面排序方式。
+  AlbumSortField albumSort;
+
+  /// Whether album page order is descending.
+  /// 相册页面是否按降序排列。
+  bool albumSortDescending;
+
   /// User-created bookmarks, kept in ascending page order.
   /// 用户创建的书签，按页码升序保存。
   final List<Bookmark> bookmarks;
@@ -156,6 +199,8 @@ class ComicBook {
     String? folderId,
     bool clearFolder = false,
     bool? customCover,
+    AlbumSortField? albumSort,
+    bool? albumSortDescending,
   }) {
     return ComicBook(
       id: id,
@@ -175,6 +220,8 @@ class ComicBook {
       folderId: clearFolder ? null : (folderId ?? this.folderId),
       tags: tags ?? this.tags,
       customCover: customCover ?? this.customCover,
+      albumSort: albumSort ?? this.albumSort,
+      albumSortDescending: albumSortDescending ?? this.albumSortDescending,
       bookmarks: bookmarks,
     );
   }
@@ -197,6 +244,8 @@ class ComicBook {
     'folderId': folderId,
     'tags': tags,
     'customCover': customCover,
+    'albumSort': albumSort.name,
+    'albumSortDescending': albumSortDescending,
     'bookmarks': bookmarks.map((bookmark) => bookmark.toJson()).toList(),
   };
 
@@ -252,6 +301,8 @@ class ComicBook {
       folderId: rawFolder == null || rawFolder.isEmpty ? null : rawFolder,
       tags: tags,
       customCover: json['customCover'] == true,
+      albumSort: AlbumSortField.fromName(json['albumSort'] as String? ?? ''),
+      albumSortDescending: json['albumSortDescending'] == true,
       bookmarks: bookmarks,
     );
   }
