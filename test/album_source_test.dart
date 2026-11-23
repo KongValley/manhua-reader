@@ -1,13 +1,14 @@
 import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui' show Size;
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 import 'package:manhua_reader/formats/album/album_store.dart';
 import 'package:manhua_reader/formats/album_comic_source.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late Directory temp;
 
   setUp(() async {
@@ -85,6 +86,34 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('reads only the SAF image prefix through the native channel', () async {
+    const channel = MethodChannel('manhua/saf');
+    final calls = <MethodCall>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return Uint8List.fromList([1, 2, 3]);
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    final store = SafAlbumStore('content://tree');
+    final prefix = await store.readPrefix(
+      const AlbumImage(
+        relativePath: 'page1.jpg',
+        name: 'page1.jpg',
+        size: 3,
+        width: 0,
+        height: 0,
+        uri: 'content://tree/document/page1',
+      ),
+    );
+
+    expect(prefix, [1, 2, 3]);
+    expect(calls.single.method, 'readDocumentPrefix');
+    expect(calls.single.arguments, containsPair('maxBytes', 128 * 1024));
   });
 }
 

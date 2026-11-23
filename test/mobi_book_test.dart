@@ -50,6 +50,11 @@ void main() {
         expect(bytes[1], 0xD8);
         expect(bytes[2], 0xFF);
         expect(await book.readPage(0), same(bytes));
+        final concurrent = await Future.wait([
+          book.readPage(3),
+          book.readPage(3),
+        ]);
+        expect(concurrent[0], same(concurrent[1]));
       } finally {
         await book.dispose();
       }

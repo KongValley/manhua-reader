@@ -180,6 +180,7 @@ class _SeriesCard extends StatelessWidget {
                     child: BookCover(
                       book: books.first,
                       showProgress: false,
+                      showFinishedBadge: books.every((book) => book.isFinished),
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),

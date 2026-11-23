@@ -288,10 +288,16 @@ class SafAlbumStore implements AlbumStore {
 
   @override
   Future<Uint8List> readPrefix(AlbumImage image) async {
-    final bytes = await readBytes(image);
-    return bytes.length <= _albumHeaderBytes
-        ? bytes
-        : Uint8List.sublistView(bytes, 0, _albumHeaderBytes);
+    final uri = image.uri;
+    if (uri == null) throw AlbumSourceException('图片路径无效');
+    try {
+      return await SafAlbumService.readDocumentPrefix(
+        uri,
+        maxBytes: _albumHeaderBytes,
+      );
+    } catch (error) {
+      throw AlbumSourceException('无法读取图片 ${image.name}：$error');
+    }
   }
 
   @override

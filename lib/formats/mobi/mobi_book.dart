@@ -268,6 +268,11 @@ class MobiBook {
     }
     return _exclusive(() async {
       if (_disposed) throw MobiException('MOBI 文件已关闭');
+      final cached = _cache.remove(index);
+      if (cached != null) {
+        _cache[index] = cached;
+        return cached;
+      }
       final image = images[index];
       final handle = _handle ??= await File(path).open();
       await handle.setPosition(image.offset);
@@ -275,6 +280,8 @@ class MobiBook {
       if (bytes.length != image.length) {
         throw MobiException('读取第 ${index + 1} 页失败');
       }
+      final previous = _cache.remove(index);
+      if (previous != null) _cachedBytes -= previous.length;
       _cache[index] = bytes;
       _cachedBytes += bytes.length;
       while ((_cache.length > _cacheLimit || _cachedBytes > _cacheByteLimit) &&

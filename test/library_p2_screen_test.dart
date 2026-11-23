@@ -8,6 +8,7 @@ import 'package:manhua_reader/app.dart';
 import 'package:manhua_reader/models/comic_book.dart';
 import 'package:manhua_reader/services/app_paths.dart';
 import 'package:manhua_reader/services/library_repository.dart';
+import 'package:manhua_reader/widgets/book_cover.dart';
 import 'package:path/path.dart' as p;
 
 class _Harness {
@@ -247,6 +248,44 @@ void main() {
     expect(find.text('海贼王 第1卷'), findsOneWidget);
     expect(find.text('海贼王 第2卷'), findsOneWidget);
     expect(find.text('日常'), findsNothing);
+  });
+
+  testWidgets('marks a series finished only when every volume is finished', (
+    tester,
+  ) async {
+    final harness = await _pumpLibrary(tester);
+    final first = harness.repository.books.firstWhere(
+      (book) => book.id == 'one-piece-1',
+    );
+    final second = harness.repository.books.firstWhere(
+      (book) => book.id == 'one-piece-2',
+    );
+    harness.repository.markBooksRead([first]);
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.text('系列合集'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final seriesCard = find
+        .ancestor(of: find.text('海贼王'), matching: find.byType(InkWell))
+        .first;
+    expect(
+      find.descendant(of: seriesCard, matching: find.byType(FinishedBadge)),
+      findsNothing,
+    );
+
+    harness.repository.markBooksRead([second]);
+    await tester.pump();
+    expect(
+      find.descendant(of: seriesCard, matching: find.byType(FinishedBadge)),
+      findsOneWidget,
+    );
+
+    await tester.runAsync(harness.repository.flush);
   });
 
   testWidgets('edits series and tags from the action sheet', (tester) async {

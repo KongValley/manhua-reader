@@ -119,12 +119,14 @@ class BookCover extends StatelessWidget {
     required this.book,
     this.borderRadius = const BorderRadius.all(Radius.circular(16)),
     this.showProgress = true,
+    this.showFinishedBadge = true,
     super.key,
   });
 
   final ComicBook book;
   final BorderRadius borderRadius;
   final bool showProgress;
+  final bool showFinishedBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -159,7 +161,7 @@ class BookCover extends StatelessWidget {
                 top: 8,
                 child: FormatBadge(format: book.format, compact: true),
               ),
-              if (book.isFinished)
+              if (showFinishedBadge && book.isFinished)
                 Positioned(
                   left: 6,
                   bottom: 8,

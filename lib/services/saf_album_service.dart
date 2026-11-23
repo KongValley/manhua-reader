@@ -81,6 +81,20 @@ class SafAlbumService {
     return bytes;
   }
 
+  static Future<Uint8List> readDocumentPrefix(
+    String uri, {
+    int maxBytes = 128 * 1024,
+  }) async {
+    final bytes = await _channel.invokeMethod<Uint8List>('readDocumentPrefix', {
+      'uri': uri,
+      'maxBytes': maxBytes,
+    });
+    if (bytes == null) {
+      throw StateError('无法读取图片头部');
+    }
+    return bytes;
+  }
+
   static Future<void> releaseTree(String uri) async {
     if (!isSupported || !uri.startsWith('content://')) return;
     try {

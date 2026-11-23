@@ -105,6 +105,16 @@ class MainActivity : FlutterActivity() {
                             readDocument(Uri.parse(uri), maxBytes, result)
                         }
                     }
+                    "readDocumentPrefix" -> {
+                        val uri = call.argument<String>("uri")
+                        val maxBytes = call.argument<Int>("maxBytes")
+                            ?: 128 * 1024
+                        if (uri == null) {
+                            result.error("bad_args", "Missing document uri", null)
+                        } else {
+                            readDocumentPrefix(Uri.parse(uri), maxBytes, result)
+                        }
+                    }
                     "releaseTree" -> {
                         val uri = call.argument<String>("uri")
                         if (uri == null) {
@@ -362,6 +372,43 @@ class MainActivity : FlutterActivity() {
                     result.error(
                         "saf_read_failed",
                         error.message ?: "Cannot read document",
+                        null,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun readDocumentPrefix(
+        uri: Uri,
+        maxBytes: Int,
+        result: MethodChannel.Result,
+    ) {
+        ioExecutor.execute {
+            try {
+                val output = java.io.ByteArrayOutputStream()
+                val input = contentResolver.openInputStream(uri)
+                    ?: throw IllegalStateException("Cannot open document")
+                input.use { stream ->
+                    val buffer = ByteArray(64 * 1024)
+                    var remaining = maxBytes
+                    while (remaining > 0) {
+                        val count = stream.read(
+                            buffer,
+                            0,
+                            minOf(buffer.size, remaining),
+                        )
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        remaining -= count
+                    }
+                }
+                runOnUiThread { result.success(output.toByteArray()) }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    result.error(
+                        "saf_read_failed",
+                        error.message ?: "Cannot read document prefix",
                         null,
                     )
                 }
