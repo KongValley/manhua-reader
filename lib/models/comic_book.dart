@@ -207,6 +207,11 @@ class ComicBook {
 
   bool get hasStarted => lastReadAt != null;
 
+  /// Whether the last page has been reached after reading began.
+  /// 开始阅读后是否已经读到最后一页。
+  bool get isFinished =>
+      pageCount > 0 && lastReadAt != null && safeLastPage >= pageCount - 1;
+
   DateTime get lastActivity => lastReadAt ?? addedAt;
 
   ComicBook copyWith({

@@ -35,8 +35,8 @@ void main() {
       'page2.jpg',
       'page10.jpg',
     ]);
-    expect(images.first.width, 200);
-    expect(images.first.height, 300);
+    expect(images.first.width, 0);
+    expect(images.first.height, 0);
     expect(await store.readBytes(images[1]), await _read(temp, 'page1.jpg'));
     await store.dispose();
   });
@@ -48,15 +48,23 @@ void main() {
     await _write(temp, 'chapter-2/001.jpg', _jpeg(100, 150));
 
     final source = await AlbumComicSource.open(temp.path);
+    var changes = 0;
+    void onSizesChanged() => changes++;
+    source.pageSizesChanged.addListener(onSizesChanged);
     try {
       expect(source.pageCount, 4);
+      await source.ensurePageSizes([1]);
+      await Future<void>.delayed(Duration.zero);
       expect(source.pageSize(1), const Size(100, 150));
+      expect(changes, 1);
       final toc = await source.loadToc();
       expect(toc.map((entry) => entry.title), ['chapter-1', 'chapter-2']);
       expect(toc.map((entry) => entry.page), [0, 2]);
       final bytes = await source.readPageBytes(0);
       expect(bytes, isNotEmpty);
+      expect(source.pageSize(0), const Size(100, 150));
     } finally {
+      source.pageSizesChanged.removeListener(onSizesChanged);
       await source.dispose();
     }
   });

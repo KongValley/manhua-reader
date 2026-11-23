@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -10,19 +11,31 @@ import '../widgets/comic_page_image.dart';
 import 'album/album_store.dart';
 import 'comic_source.dart';
 import 'page_raster.dart';
+import 'zip/image_size.dart';
 
 /// Reads a referenced folder of images as one comic album.
 /// 将引用的图片文件夹作为一本相册读取。
-class AlbumComicSource implements ComicSource, ComicPageRenderer {
-  AlbumComicSource._(this._store, this._images, this._sizes, this._toc);
+class AlbumComicSource
+    implements ComicSource, ComicPageRenderer, ComicPageLayoutSource {
+  AlbumComicSource._(
+    this._store,
+    this._images,
+    this._sizes,
+    this._defaultSize,
+    this._toc,
+  );
 
   final AlbumStore _store;
   final List<AlbumImage> _images;
-  final List<Size> _sizes;
+  final List<Size?> _sizes;
+  final Size _defaultSize;
   final List<TocEntry> _toc;
 
   final LinkedHashMap<int, Uint8List> _cache = LinkedHashMap<int, Uint8List>();
+  final ValueNotifier<int> _sizeRevision = ValueNotifier<int>(0);
+  final Set<int> _probing = <int>{};
   int _cachedBytes = 0;
+  bool _notifyScheduled = false;
   bool _disposed = false;
   static const int _cacheLimit = 6;
   static const int _cacheByteLimit = 48 * 1024 * 1024;
@@ -35,15 +48,24 @@ class AlbumComicSource implements ComicSource, ComicPageRenderer {
     final store = createAlbumStore(source);
     try {
       final images = await store.list(sort: sort, descending: descending);
-      final sizes = [
-        for (final image in images)
-          image.width > 0 && image.height > 0
-              ? ComicSource.safePageSize(
-                  Size(image.width.toDouble(), image.height.toDouble()),
-                )
-              : ComicSource.fallbackPageSize,
-      ];
-      return AlbumComicSource._(store, images, sizes, _buildToc(images));
+      final sizes = List<Size?>.filled(images.length, null);
+      Size? defaultSize;
+      for (var index = 0; index < images.length; index++) {
+        final image = images[index];
+        if (image.width <= 0 || image.height <= 0) continue;
+        final size = ComicSource.safePageSize(
+          Size(image.width.toDouble(), image.height.toDouble()),
+        );
+        sizes[index] = size;
+        defaultSize ??= size;
+      }
+      return AlbumComicSource._(
+        store,
+        images,
+        sizes,
+        defaultSize ?? ComicSource.fallbackPageSize,
+        _buildToc(images),
+      );
     } catch (_) {
       await store.dispose();
       rethrow;
@@ -65,7 +87,27 @@ class AlbumComicSource implements ComicSource, ComicPageRenderer {
   ];
 
   @override
-  Size pageSize(int index) => _sizes[index];
+  Size pageSize(int index) => _sizes[index] ?? _defaultSize;
+
+  @override
+  Listenable get pageSizesChanged => _sizeRevision;
+
+  @override
+  Future<void> ensurePageSizes(Iterable<int> indices) async {
+    for (final index in indices.toSet()) {
+      if (_disposed || index < 0 || index >= _images.length) continue;
+      if (_sizes[index] != null || !_probing.add(index)) continue;
+      try {
+        final size = _sizeFromBytes(await _store.readPrefix(_images[index]));
+        if (size != null) _learnSize(index, size);
+      } catch (_) {
+        // A damaged page keeps the estimated size; rendering reports the error.
+        // 损坏页面保留估算尺寸，渲染时再显示错误。
+      } finally {
+        _probing.remove(index);
+      }
+    }
+  }
 
   Future<Uint8List> readPageBytes(int index) async {
     if (_disposed) throw StateError('Album source is closed');
@@ -79,6 +121,7 @@ class AlbumComicSource implements ComicSource, ComicPageRenderer {
     }
     final bytes = await _store.readBytes(_images[index]);
     if (_disposed) throw StateError('Album source is closed');
+    _learnSize(index, _sizeFromBytes(bytes));
     _cachedBytes -= _cache.remove(index)?.length ?? 0;
     _cache[index] = bytes;
     _cachedBytes += bytes.length;
@@ -112,9 +155,29 @@ class AlbumComicSource implements ComicSource, ComicPageRenderer {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _sizeRevision.dispose();
     _cache.clear();
     _cachedBytes = 0;
     await _store.dispose();
+  }
+
+  void _learnSize(int index, Size? size) {
+    if (_disposed || size == null || _sizes[index] != null) return;
+    _sizes[index] = size;
+    if (_notifyScheduled) return;
+    _notifyScheduled = true;
+    scheduleMicrotask(() {
+      _notifyScheduled = false;
+      if (!_disposed) _sizeRevision.value++;
+    });
+  }
+
+  static Size? _sizeFromBytes(Uint8List bytes) {
+    final dimensions = readImageDimensions(bytes);
+    if (dimensions == null) return null;
+    return ComicSource.safePageSize(
+      Size(dimensions.width.toDouble(), dimensions.height.toDouble()),
+    );
   }
 
   static List<TocEntry> _buildToc(List<AlbumImage> images) {

@@ -116,6 +116,40 @@ void main() {
     }
   });
 
+  test('opens with sampled sizes and resolves pages on demand', () async {
+    final archive = Archive();
+    for (var index = 0; index < 30; index++) {
+      final page = index == 12 ? _jpeg(200, 300) : _jpeg(120, 180);
+      archive.add(_file('page${index + 1}.jpg', page));
+    }
+    final path = await _write(temp, 'lazy.cbz', _zipBytes(archive));
+
+    ArchiveComicSource.debugSizeProbes = 0;
+    final source = await ArchiveComicSource.open(path);
+    var changes = 0;
+    void onSizesChanged() => changes++;
+    source.pageSizesChanged.addListener(onSizesChanged);
+    try {
+      expect(source.pageCount, 30);
+      expect(ArchiveComicSource.debugSizeProbes, 2);
+      expect(source.pageSize(12).width, 120);
+
+      await source.ensurePageSizes([12]);
+      await Future<void>.delayed(Duration.zero);
+      expect(source.pageSize(12).width, 200);
+      expect(source.pageSize(12).height, 300);
+      expect(changes, 1);
+
+      await source.readPageBytes(12);
+      await Future<void>.delayed(Duration.zero);
+      expect(ArchiveComicSource.debugSizeProbes, 3);
+      expect(changes, 1);
+    } finally {
+      source.pageSizesChanged.removeListener(onSizesChanged);
+      await source.dispose();
+    }
+  });
+
   test('rejects damaged, empty and encrypted archives', () async {
     final random = await _write(
       temp,

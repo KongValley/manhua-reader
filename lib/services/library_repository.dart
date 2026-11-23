@@ -625,18 +625,22 @@ class LibraryRepository extends ChangeNotifier {
 
     if (format == ComicFormat.mobi) {
       final mobi = await MobiBook.open(file.path, fallbackTitle: fallbackTitle);
-      onProgress?.call('正在生成封面', 0.9);
-      final cover = File(p.join(paths.coversDir.path, '$coverId.png'));
-      final firstPage = await mobi.readPage(0);
-      final coverPath = await CoverGenerator.fromImageBytes(
-        firstPage,
-        cover.path,
-      );
-      return _InspectedComic(
-        title: mobi.title,
-        pageCount: mobi.pageCount,
-        coverPath: coverPath,
-      );
+      try {
+        onProgress?.call('正在生成封面', 0.9);
+        final cover = File(p.join(paths.coversDir.path, '$coverId.png'));
+        final firstPage = await mobi.readPage(0);
+        final coverPath = await CoverGenerator.fromImageBytes(
+          firstPage,
+          cover.path,
+        );
+        return _InspectedComic(
+          title: mobi.title,
+          pageCount: mobi.pageCount,
+          coverPath: coverPath,
+        );
+      } finally {
+        await mobi.dispose();
+      }
     }
 
     final document = await PdfDocument.openFile(
@@ -1469,10 +1473,7 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Whether a book counts as finished, i.e. its last page has been reached.
   /// 书籍是否算已读完，即已经读到最后一页。
-  static bool isFinished(ComicBook book) =>
-      book.pageCount > 0 &&
-      book.safeLastPage >= book.pageCount - 1 &&
-      book.lastReadAt != null;
+  static bool isFinished(ComicBook book) => book.isFinished;
 
   /// Adds reading time in seconds to today's statistics.
   /// 把阅读时长（秒）计入今天的统计。

@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -76,6 +78,15 @@ class MobiBook {
   /// 封面时，第一项就是封面。
   final List<MobiImage> images;
   final List<TocEntry> toc;
+
+  final LinkedHashMap<int, Uint8List> _cache = LinkedHashMap<int, Uint8List>();
+  RandomAccessFile? _handle;
+  Future<void> _tail = Future<void>.value();
+  int _cachedBytes = 0;
+  bool _disposed = false;
+
+  static const int _cacheLimit = 6;
+  static const int _cacheByteLimit = 48 * 1024 * 1024;
 
   int get pageCount => images.length;
 
@@ -249,18 +260,46 @@ class MobiBook {
     if (index < 0 || index >= images.length) {
       throw RangeError.index(index, images, 'index');
     }
-    final image = images[index];
-    final raf = await File(path).open();
-    try {
-      await raf.setPosition(image.offset);
-      final bytes = await raf.read(image.length);
+    if (_disposed) throw MobiException('MOBI 文件已关闭');
+    final cached = _cache.remove(index);
+    if (cached != null) {
+      _cache[index] = cached;
+      return cached;
+    }
+    return _exclusive(() async {
+      if (_disposed) throw MobiException('MOBI 文件已关闭');
+      final image = images[index];
+      final handle = _handle ??= await File(path).open();
+      await handle.setPosition(image.offset);
+      final bytes = await handle.read(image.length);
       if (bytes.length != image.length) {
         throw MobiException('读取第 ${index + 1} 页失败');
       }
+      _cache[index] = bytes;
+      _cachedBytes += bytes.length;
+      while ((_cache.length > _cacheLimit || _cachedBytes > _cacheByteLimit) &&
+          _cache.isNotEmpty) {
+        final evicted = _cache.remove(_cache.keys.first)!;
+        _cachedBytes -= evicted.length;
+      }
       return bytes;
-    } finally {
-      await raf.close();
-    }
+    });
+  }
+
+  Future<T> _exclusive<T>(Future<T> Function() action) {
+    final result = _tail.then((_) => action());
+    _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return result;
+  }
+
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    await _tail;
+    await _handle?.close();
+    _handle = null;
+    _cache.clear();
+    _cachedBytes = 0;
   }
 }
 

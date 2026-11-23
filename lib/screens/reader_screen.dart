@@ -50,6 +50,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   ComicSource? _source;
   ComicPageCropController? _cropController;
+  ComicPageLayoutSource? _layoutSource;
   Object? _openError;
   bool _loading = true;
 
@@ -186,12 +187,30 @@ class _ReaderScreenState extends State<ReaderScreen>
           (bookmark) => bookmark.page < 0 || bookmark.page >= pageCount,
         );
       }
+      final initialPage = clampPage(_currentPage, pageCount);
+      final layoutSource = source is ComicPageLayoutSource
+          ? source as ComicPageLayoutSource
+          : null;
+      _bindLayoutSource(layoutSource);
+      if (layoutSource != null) {
+        try {
+          await layoutSource.ensurePageSizes([initialPage]);
+        } catch (_) {
+          // Size discovery is best effort; rendering reports page errors.
+          // 尺寸探测是尽力而为，页面错误留到渲染时报告。
+        }
+        if (!mounted || book != _book) {
+          _unbindLayoutSource();
+          await source.dispose();
+          return;
+        }
+      }
       final crop = ComicPageCropController(source)..addListener(_onCropChanged);
       setState(() {
         _source = source;
         _cropController = crop;
         _pageCount = pageCount;
-        _currentPage = clampPage(_currentPage, pageCount);
+        _currentPage = initialPage;
         _spreads = buildSpreads(pageCount, offset: _spreadOffset);
         _tocFuture = source.loadToc();
         _pageController = _startingPageController();
@@ -219,6 +238,34 @@ class _ReaderScreenState extends State<ReaderScreen>
     setState(() => _toc = toc);
   }
 
+  void _bindLayoutSource(ComicPageLayoutSource? source) {
+    if (identical(source, _layoutSource)) return;
+    _layoutSource?.pageSizesChanged.removeListener(_onPageSizesChanged);
+    _layoutSource = source;
+    _layoutSource?.pageSizesChanged.addListener(_onPageSizesChanged);
+  }
+
+  void _unbindLayoutSource() {
+    _layoutSource?.pageSizesChanged.removeListener(_onPageSizesChanged);
+    _layoutSource = null;
+  }
+
+  void _onPageSizesChanged() {
+    if (!mounted || _source == null) return;
+    _verticalLayoutDirty = true;
+    setState(() {});
+  }
+
+  void _ensurePageSizesAround(int page) {
+    final source = _layoutSource;
+    if (source == null) return;
+    unawaited(
+      source
+          .ensurePageSizes({page - 1, page, page + 1})
+          .catchError((Object _) {}),
+    );
+  }
+
   /// Replaces the current volume with [next] without leaving the reader, so
   /// system UI, keep-awake and key handling stay in place.
   /// 在阅读器内直接切换到 [next]，系统栏、常亮和按键处理保持不变。
@@ -234,6 +281,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _persistProgressNow();
     _stopReadingTimer();
     _autoTurn.configure(null);
+    _unbindLayoutSource();
     final source = _source;
     final crop = _cropController;
     final pageController = _pageController;
@@ -526,6 +574,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _handlePageChanged(int page) {
     if (page == _currentPage) return;
+    _ensurePageSizesAround(page);
     setState(() => _currentPage = page);
     _persistProgressSoon();
     _scheduleChromeHide();
@@ -537,6 +586,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (index < 0 || index >= _spreads.length) return;
     final spread = _spreads[index];
     if (spread.contains(_currentPage)) return;
+    _ensurePageSizesAround(spread.first);
     setState(() => _currentPage = spread.first);
     _persistProgressSoon();
     _scheduleChromeHide();
@@ -575,6 +625,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _goToPage(int page, {bool animate = true, bool revealChrome = false}) {
     if (_loading || _source == null || _pageCount <= 0) return;
     final target = clampPage(page, _pageCount);
+    _ensurePageSizesAround(target);
     if (revealChrome) _keepChromeVisible();
 
     if (_mode == ReadingMode.horizontal) {
@@ -1049,6 +1100,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _currentPage = page;
         _verticalAtEnd = atEnd;
       });
+      _ensurePageSizesAround(page);
       _persistProgressSoon();
       if (reachedEnd) _announceLastPage();
     }
@@ -1139,6 +1191,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _unbindLayoutSource();
     _hideTimer?.cancel();
     _persistTimer?.cancel();
     _stopReadingTimer();

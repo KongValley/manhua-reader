@@ -46,5 +46,5 @@ class MobiComicSource implements ComicSource, ComicPageRenderer {
   Future<List<TocEntry>> loadToc() async => book.toc;
 
   @override
-  Future<void> dispose() async {}
+  Future<void> dispose() => book.dispose();
 }

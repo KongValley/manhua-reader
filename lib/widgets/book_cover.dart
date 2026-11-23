@@ -55,6 +55,63 @@ class FormatBadge extends StatelessWidget {
   }
 }
 
+/// Green marker shown once a book has been read to its last page.
+/// 读到最后一页后显示的绿色完成标记。
+class FinishedBadge extends StatelessWidget {
+  const FinishedBadge({this.compact = false, super.key});
+
+  final bool compact;
+
+  static const String _tooltip = '已读完 · 已看到最后一页';
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = Icon(
+      Icons.done_rounded,
+      size: compact ? 13 : 12,
+      color: AppColors.success,
+    );
+
+    return Tooltip(
+      message: _tooltip,
+      child: Semantics(
+        label: '已读完',
+        child: Container(
+          width: compact ? 22 : null,
+          height: compact ? 22 : null,
+          padding: compact
+              ? EdgeInsets.zero
+              : const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(compact ? 11 : 7),
+            border: Border.all(color: AppColors.success.withValues(alpha: 0.6)),
+          ),
+          child: compact
+              ? icon
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    icon,
+                    const SizedBox(width: 3),
+                    const Text(
+                      '已读完',
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        height: 1,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.2,
+                        color: AppColors.success,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Book cover with a graceful fallback when the thumbnail is missing.
 /// 书籍封面：缩略图缺失时显示优雅的占位图。
 class BookCover extends StatelessWidget {
@@ -76,70 +133,84 @@ class BookCover extends StatelessWidget {
         ? null
         : File(coverPath);
 
-    return ClipRRect(
-      borderRadius: borderRadius,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          _CoverPlaceholder(book: book),
-          if (coverFile != null)
-            Image.file(
-              coverFile,
-              fit: BoxFit.cover,
-              filterQuality: FilterQuality.medium,
-              gaplessPlayback: true,
-              errorBuilder: (context, error, stackTrace) =>
-                  _CoverPlaceholder(book: book),
-            ),
-          Positioned(
-            left: 8,
-            top: 8,
-            child: FormatBadge(format: book.format, compact: true),
-          ),
-          if (showProgress)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: Container(
-                height: 3,
-                color: Colors.white.withValues(alpha: 0.12),
-                alignment: Alignment.centerLeft,
-                child: FractionallySizedBox(
-                  widthFactor: book.progress <= 0 ? 0.001 : book.progress,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Small covers only have room for a check mark. Wider cards can show
+        // the full label without touching the quick actions.
+        // 小封面只显示勾选图标；较宽封面显示完整文字且避开快捷操作。
+        final compactBadge = constraints.maxWidth < 156;
+        return ClipRRect(
+          borderRadius: borderRadius,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _CoverPlaceholder(book: book),
+              if (coverFile != null)
+                Image.file(
+                  coverFile,
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.medium,
+                  gaplessPlayback: true,
+                  errorBuilder: (context, error, stackTrace) =>
+                      _CoverPlaceholder(book: book),
+                ),
+              Positioned(
+                left: 8,
+                top: 8,
+                child: FormatBadge(format: book.format, compact: true),
+              ),
+              if (book.isFinished)
+                Positioned(
+                  left: 6,
+                  bottom: 8,
+                  child: FinishedBadge(compact: compactBadge),
+                ),
+              if (showProgress)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
                   child: Container(
-                    decoration: const BoxDecoration(
+                    height: 3,
+                    color: Colors.white.withValues(alpha: 0.12),
+                    alignment: Alignment.centerLeft,
+                    child: FractionallySizedBox(
+                      widthFactor: book.progress <= 0 ? 0.001 : book.progress,
+                      child: Container(
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [AppColors.accent, AppColors.accentDeep],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: borderRadius,
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.08),
+                      ),
                       gradient: LinearGradient(
-                        colors: [AppColors.accent, AppColors.accentDeep],
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        stops: const [0.55, 1],
+                        colors: [
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: 0.18),
+                        ],
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-          Positioned.fill(
-            child: IgnorePointer(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: borderRadius,
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.08),
-                  ),
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    stops: const [0.55, 1],
-                    colors: [
-                      Colors.transparent,
-                      Colors.black.withValues(alpha: 0.18),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

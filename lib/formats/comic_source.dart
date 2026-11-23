@@ -52,6 +52,18 @@ abstract class ComicSource {
   }
 }
 
+/// A source whose page sizes can be discovered after the book has opened.
+/// 打开书籍后再逐步发现页面尺寸的来源。
+abstract interface class ComicPageLayoutSource {
+  /// Fires when one or more previously estimated page sizes become exact.
+  /// 一页或多页的估算尺寸变为准确尺寸时通知。
+  Listenable get pageSizesChanged;
+
+  /// Resolves exact sizes for the requested pages without blocking the book.
+  /// 按需解析指定页面的准确尺寸，不阻塞整本书打开。
+  Future<void> ensurePageSizes(Iterable<int> indices);
+}
+
 /// A source that can produce a new bitmap for the requested pixel budget.
 /// 能按指定像素预算生成新位图的来源。
 abstract interface class ComicPageRenderer {

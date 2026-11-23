@@ -9,6 +9,7 @@ class AppColors {
   static const surfaceHigh = Color(0xFF1D212A);
   static const accent = Color(0xFFFFB35C);
   static const accentDeep = Color(0xFFFF7A45);
+  static const success = Color(0xFF7BC98B);
   static const textPrimary = Color(0xFFF7F2E9);
   static const textSecondary = Color(0xFF9A9EAA);
   static const divider = Color(0x14FFFFFF);

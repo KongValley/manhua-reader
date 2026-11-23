@@ -215,13 +215,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       case _ReadFilter.unread:
         return book.lastReadAt == null;
       case _ReadFilter.reading:
-        return book.lastReadAt != null &&
-            book.pageCount > 0 &&
-            book.safeLastPage < book.pageCount - 1;
+        return book.hasStarted && !book.isFinished;
       case _ReadFilter.finished:
-        return book.lastReadAt != null &&
-            book.pageCount > 0 &&
-            book.safeLastPage >= book.pageCount - 1;
+        return book.isFinished;
     }
   }
 
@@ -3289,6 +3285,9 @@ class _ContinueReadingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final finished = book.isFinished;
+    final statusColor = finished ? AppColors.success : AppColors.accent;
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -3331,19 +3330,19 @@ class _ContinueReadingCard extends StatelessWidget {
                           Container(
                             width: 5,
                             height: 5,
-                            decoration: const BoxDecoration(
+                            decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: AppColors.accent,
+                              color: statusColor,
                             ),
                           ),
                           const SizedBox(width: 6),
-                          const Text(
-                            '继续阅读',
+                          Text(
+                            finished ? '已读完' : '继续阅读',
                             style: TextStyle(
                               fontSize: 10.5,
                               fontWeight: FontWeight.w700,
                               letterSpacing: 1.2,
-                              color: AppColors.accent,
+                              color: statusColor,
                             ),
                           ),
                         ],
@@ -3391,10 +3390,10 @@ class _ContinueReadingCard extends StatelessWidget {
                     shape: BoxShape.circle,
                     color: Colors.white.withValues(alpha: 0.06),
                   ),
-                  child: const Icon(
-                    Icons.play_arrow_rounded,
+                  child: Icon(
+                    finished ? Icons.done_rounded : Icons.play_arrow_rounded,
                     size: 20,
-                    color: AppColors.accent,
+                    color: statusColor,
                   ),
                 ),
               ],
@@ -3597,6 +3596,8 @@ class _BookCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final subtitle = missing
         ? '文件丢失 · 点按处理'
+        : book.isFinished
+        ? '已读完 · 第 ${book.safeLastPage + 1} 页'
         : book.hasStarted
         ? '${formatProgressLabel(book.safeLastPage, book.pageCount)} · 第 ${book.safeLastPage + 1} 页'
         : '${formatPageCount(book.pageCount)} · 未读';
@@ -3696,6 +3697,8 @@ class _BookCard extends StatelessWidget {
                 fontSize: 11,
                 color: missing
                     ? const Color(0xFFE57373)
+                    : book.isFinished
+                    ? AppColors.success
                     : book.hasStarted
                     ? AppColors.accent.withValues(alpha: 0.9)
                     : AppColors.textSecondary,
@@ -3788,11 +3791,17 @@ class _BookListItem extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       '${book.format.label} · ${formatPageCount(book.pageCount)} · '
-                      '${book.hasStarted ? '${formatProgressLabel(book.safeLastPage, book.pageCount)} · 第 ${book.safeLastPage + 1} 页' : '未读'}',
+                      '${book.isFinished
+                          ? '已读完'
+                          : book.hasStarted
+                          ? '${formatProgressLabel(book.safeLastPage, book.pageCount)} · 第 ${book.safeLastPage + 1} 页'
+                          : '未读'}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall
-                          ?.copyWith(fontSize: 10.5),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontSize: 10.5,
+                        color: book.isFinished ? AppColors.success : null,
+                      ),
                     ),
                     const SizedBox(height: 3),
                     Text(

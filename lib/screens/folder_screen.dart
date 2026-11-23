@@ -268,6 +268,8 @@ class FolderBookCard extends StatelessWidget {
             Text(
               missing
                   ? '文件丢失'
+                  : book.isFinished
+                  ? '已读完 · 第 ${book.safeLastPage + 1} 页'
                   : '${formatProgressLabel(book.safeLastPage, book.pageCount)} · '
                         '第 ${book.safeLastPage + 1} 页',
               maxLines: 1,
@@ -276,6 +278,8 @@ class FolderBookCard extends StatelessWidget {
                 fontSize: 10.5,
                 color: missing
                     ? const Color(0xFFE57373)
+                    : book.isFinished
+                    ? AppColors.success
                     : book.hasStarted
                     ? AppColors.accent.withValues(alpha: 0.9)
                     : AppColors.textSecondary,

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -6,7 +7,6 @@ import 'package:path/path.dart' as p;
 import '../../models/comic_book.dart';
 import '../../services/saf_album_service.dart';
 import '../../utils/natural_sort.dart';
-import '../zip/image_size.dart';
 
 /// One image page inside an album folder.
 /// 相册文件夹中的一页图片。
@@ -53,6 +53,10 @@ abstract class AlbumStore {
 
   Future<Uint8List> readBytes(AlbumImage image);
 
+  /// Reads only the image header used to discover its dimensions.
+  /// 仅读取用于识别图片尺寸的头部字节。
+  Future<Uint8List> readPrefix(AlbumImage image);
+
   Future<void> dispose();
 }
 
@@ -95,6 +99,7 @@ const int albumMaxImages = 2000;
 const int albumMaxPageBytes = 64 * 1024 * 1024;
 const int _albumMaxDepth = 24;
 const int _albumHeaderBytes = 128 * 1024;
+const int _albumMetadataConcurrency = 6;
 
 const Set<String> albumImageExtensions = {
   'jpg',
@@ -135,37 +140,22 @@ class FileAlbumStore implements AlbumStore {
     if (!await root.exists()) {
       throw AlbumSourceException('相册文件夹不可用，请重新选择');
     }
-    final images = <AlbumImage>[];
+    final entries = <({String relativePath, File file})>[];
     await for (final entity in root.list(recursive: true, followLinks: false)) {
       if (entity is! File) continue;
       final relativePath = p
           .relative(entity.path, from: root.path)
           .replaceAll('\\', '/');
       if (!isAlbumImagePath(relativePath)) continue;
-      if (images.length >= albumMaxImages) {
+      if (entries.length >= albumMaxImages) {
         throw AlbumSourceException('相册图片超过 $albumMaxImages 张');
       }
-      final stat = await entity.stat();
-      if (stat.size > albumMaxPageBytes) {
-        throw AlbumSourceException('相册中有超过 64 MB 的图片');
-      }
-      final dimensions = await _readDimensions(entity);
-      images.add(
-        AlbumImage(
-          relativePath: relativePath,
-          name: p.posix.basename(relativePath),
-          size: stat.size,
-          width: dimensions?.width ?? 0,
-          height: dimensions?.height ?? 0,
-          created: stat.changed,
-          modified: stat.modified,
-          filePath: entity.path,
-        ),
-      );
+      entries.add((relativePath: relativePath, file: entity));
     }
-    if (images.isEmpty) {
+    if (entries.isEmpty) {
       throw AlbumSourceException('相册文件夹里没有可显示的图片');
     }
+    final images = await _describe(entries);
     return sortAlbumImages(images, sort, descending);
   }
 
@@ -185,9 +175,55 @@ class FileAlbumStore implements AlbumStore {
   }
 
   @override
+  Future<Uint8List> readPrefix(AlbumImage image) async {
+    final path = image.filePath;
+    if (path == null) throw AlbumSourceException('图片路径无效');
+    return _readPrefixFile(File(path));
+  }
+
+  @override
   Future<void> dispose() async {}
 
-  Future<({int width, int height})?> _readDimensions(File file) async {
+  Future<List<AlbumImage>> _describe(
+    List<({String relativePath, File file})> entries,
+  ) async {
+    final images = List<AlbumImage?>.filled(entries.length, null);
+    var cursor = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final index = cursor++;
+        if (index >= entries.length) return;
+        final entry = entries[index];
+        final stat = await entry.file.stat();
+        if (stat.size > albumMaxPageBytes) {
+          throw AlbumSourceException('相册中有超过 64 MB 的图片');
+        }
+        images[index] = AlbumImage(
+          relativePath: entry.relativePath,
+          name: p.posix.basename(entry.relativePath),
+          size: stat.size,
+          width: 0,
+          height: 0,
+          created: stat.changed,
+          modified: stat.modified,
+          filePath: entry.file.path,
+        );
+      }
+    }
+
+    await Future.wait([
+      for (
+        var index = 0;
+        index < math.min(_albumMetadataConcurrency, entries.length);
+        index++
+      )
+        worker(),
+    ]);
+    return images.cast<AlbumImage>();
+  }
+
+  Future<Uint8List> _readPrefixFile(File file) async {
     RandomAccessFile? handle;
     try {
       handle = await file.open();
@@ -196,10 +232,7 @@ class FileAlbumStore implements AlbumStore {
           ? length
           : _albumHeaderBytes;
       await handle.setPosition(0);
-      final bytes = await handle.read(readLength);
-      return readImageDimensions(bytes);
-    } catch (_) {
-      return null;
+      return await handle.read(readLength);
     } finally {
       await handle?.close();
     }
@@ -251,6 +284,14 @@ class SafAlbumStore implements AlbumStore {
     } catch (error) {
       throw AlbumSourceException('无法读取图片 ${image.name}：$error');
     }
+  }
+
+  @override
+  Future<Uint8List> readPrefix(AlbumImage image) async {
+    final bytes = await readBytes(image);
+    return bytes.length <= _albumHeaderBytes
+        ? bytes
+        : Uint8List.sublistView(bytes, 0, _albumHeaderBytes);
   }
 
   @override

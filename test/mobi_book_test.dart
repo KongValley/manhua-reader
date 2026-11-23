@@ -43,11 +43,17 @@ void main() {
 
     test('loads page bytes lazily from disk', () async {
       final book = await MobiBook.open(sample.path);
-      final bytes = await book.readPage(0);
-      expect(bytes.length, book.images.first.length);
-      expect(bytes[0], 0xFF);
-      expect(bytes[1], 0xD8);
-      expect(bytes[2], 0xFF);
+      try {
+        final bytes = await book.readPage(0);
+        expect(bytes.length, book.images.first.length);
+        expect(bytes[0], 0xFF);
+        expect(bytes[1], 0xD8);
+        expect(bytes[2], 0xFF);
+        expect(await book.readPage(0), same(bytes));
+      } finally {
+        await book.dispose();
+      }
+      await expectLater(book.readPage(0), throwsA(isA<MobiException>()));
     });
 
     test('rejects non-MOBI files', () async {

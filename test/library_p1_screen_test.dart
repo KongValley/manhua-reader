@@ -227,6 +227,40 @@ void main() {
     await tester.runAsync(harness.repository.flush);
   });
 
+  testWidgets('marks books read to the last page as finished', (tester) async {
+    final harness = await _pumpLibrary(tester);
+
+    final finishedCard = find
+        .ancestor(of: find.text('完结篇').last, matching: find.byType(InkWell))
+        .first;
+    expect(
+      find.descendant(of: finishedCard, matching: find.byType(FinishedBadge)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: finishedCard, matching: find.text('已读完')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: finishedCard, matching: find.text('已读完 · 第 10 页')),
+      findsOneWidget,
+    );
+
+    final readingCard = find
+        .ancestor(of: find.text('山林日记'), matching: find.byType(InkWell))
+        .first;
+    expect(
+      find.descendant(of: readingCard, matching: find.byType(FinishedBadge)),
+      findsNothing,
+    );
+
+    await tester.tap(find.byTooltip('切换为列表'));
+    await tester.pump();
+    expect(find.text('PDF · 10 页 · 已读完'), findsOneWidget);
+
+    await tester.runAsync(harness.repository.flush);
+  });
+
   testWidgets('selects all visible books and closes batch mode', (
     tester,
   ) async {
@@ -370,11 +404,17 @@ void main() {
       of: card,
       matching: find.byTooltip('收藏《完结篇》'),
     );
+    final finished = find.descendant(
+      of: card,
+      matching: find.byType(FinishedBadge),
+    );
 
     final badgeRect = tester.getRect(badge);
     final actionRect = tester.getRect(favorite);
+    final finishedRect = tester.getRect(finished);
     expect(actionRect.overlaps(badgeRect), isFalse);
     expect(actionRect.top, greaterThanOrEqualTo(badgeRect.bottom));
+    expect(actionRect.overlaps(finishedRect), isFalse);
   });
 
   testWidgets('fits the selection bar on a narrow phone', (tester) async {
