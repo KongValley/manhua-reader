@@ -2,7 +2,7 @@ name: manhua_reader
 description: "漫阅 - 支持 PDF 与 MOBI 的手机 / 平板漫画阅读器"
 publish_to: 'none'
 
-version: 1.7.0+8
+version: 1.7.1+9
 
 environment:
   sdk: ^3.13.5

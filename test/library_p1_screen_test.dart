@@ -390,4 +390,20 @@ void main() {
     expect(find.text('已读'), findsOneWidget);
     expect(find.text('删除'), findsOneWidget);
   });
+
+  testWidgets('keeps selection actions above the system navigation bar', (
+    tester,
+  ) async {
+    await _pumpLibrary(tester, size: const Size(360, 800));
+    tester.view.padding = const FakeViewPadding(bottom: 48);
+    tester.view.viewPadding = const FakeViewPadding(bottom: 48);
+    addTearDown(tester.view.resetPadding);
+    addTearDown(tester.view.resetViewPadding);
+
+    await tester.longPress(find.text('完结篇').last);
+    await tester.pump();
+
+    final delete = tester.getRect(find.text('删除'));
+    expect(delete.bottom, lessThanOrEqualTo(800 - 48));
+  });
 }

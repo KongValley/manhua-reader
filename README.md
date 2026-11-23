@@ -242,7 +242,7 @@ flutter analyze
 flutter test
 ```
 
-公开仓库不含 `test/VOL.001.*`。缺失样本时，相应测试会自动跳过。本机样本齐全时共 152 项测试。
+公开仓库不含 `test/VOL.001.*`。缺失样本时，相应测试会自动跳过。本机样本齐全时共 153 项测试。
 
 - 真实样本 `test/VOL.001.mobi`：196 页、EXTH 封面、HTML `<img recindex>` 阅读顺序、尺寸解析、按页懒读取、非法文件拒绝。
 - 真实样本 `test/VOL.001.pdf`：打开 196 页文档、确认无内嵌 outline、用 PDFium 渲染首页并读取像素。

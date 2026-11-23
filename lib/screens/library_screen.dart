@@ -1863,7 +1863,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.7.0'),
+              Text('版本 1.7.1'),
             ],
           ),
         ),
@@ -3971,10 +3971,17 @@ class _SelectionBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasSelection = selectedCount > 0;
+    // Scaffold zeroes the body's MediaQuery padding when it reserves space
+    // for the system navigation bar, so read the window inset directly.
+    // Scaffold 为系统导航栏预留空间时会清零 body 的 MediaQuery padding，
+    // 因此这里直接读取窗口的 viewPadding。
+    final view = View.of(context);
+    final navInset = view.viewPadding.bottom / view.devicePixelRatio;
     return SafeArea(
       top: false,
+      bottom: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(10, 6, 12, 10),
+        padding: EdgeInsets.fromLTRB(10, 6, 12, 10 + navInset),
         decoration: BoxDecoration(
           color: AppColors.surfaceHigh,
           border: Border(
