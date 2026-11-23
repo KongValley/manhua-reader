@@ -16,4 +16,15 @@ std::string Utf8FromUtf16(const wchar_t* utf16_string);
 // encoded in UTF-8. Returns an empty std::vector<std::string> on failure.
 std::vector<std::string> GetCommandLineArguments();
 
+// Reads absolute paths for supported launch arguments.
+// 读取支持的启动参数并解析为绝对路径。
+std::vector<std::wstring> GetOpenFileArguments();
+bool IsSupportedOpenPath(const std::wstring& path);
+std::wstring GetExecutablePath();
+
+// Registers this executable as an optional Windows Open with choice.
+// 将此可执行文件注册为 Windows“打开方式”的可选程序。
+bool AreFileAssociationsRegistered();
+long SetFileAssociationsRegistered(bool registered);
+
 #endif  // RUNNER_UTILS_H_

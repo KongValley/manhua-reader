@@ -3,14 +3,34 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
 import 'screens/library_screen.dart';
+import 'services/external_open_channel.dart';
 import 'services/library_repository.dart';
 import 'theme/app_theme.dart';
 
-class ManhuaApp extends StatelessWidget {
-  const ManhuaApp({required this.repository, this.home, super.key});
+class ManhuaApp extends StatefulWidget {
+  const ManhuaApp({
+    required this.repository,
+    this.externalOpen,
+    this.home,
+    super.key,
+  });
 
   final LibraryRepository repository;
+  final ExternalOpenChannel? externalOpen;
   final Widget? home;
+
+  @override
+  State<ManhuaApp> createState() => _ManhuaAppState();
+}
+
+class _ManhuaAppState extends State<ManhuaApp> {
+  final _externalRoutes = ExternalOpenNavigatorObserver();
+
+  @override
+  void dispose() {
+    _externalRoutes.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -19,7 +39,13 @@ class ManhuaApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
       scrollBehavior: const AppScrollBehavior(),
-      home: home ?? LibraryScreen(repository: repository),
+      navigatorObservers: [if (widget.externalOpen != null) _externalRoutes],
+      home: widget.home ??
+          LibraryScreen(
+            repository: widget.repository,
+            externalOpen: widget.externalOpen,
+            externalRoutes: _externalRoutes,
+          ),
     );
   }
 }

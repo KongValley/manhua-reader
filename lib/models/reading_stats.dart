@@ -1,12 +1,17 @@
 /// Daily reading activity used by the bookshelf statistics panel.
 /// 书架统计面板使用的每日阅读记录。
 class ReadingStats {
-  ReadingStats({Map<String, int>? dailyPages})
-    : dailyPages = dailyPages ?? <String, int>{};
+  ReadingStats({Map<String, int>? dailyPages, Map<String, int>? dailySeconds})
+    : dailyPages = dailyPages ?? <String, int>{},
+      dailySeconds = dailySeconds ?? <String, int>{};
 
   /// Pages read per local calendar day, keyed by `yyyy-MM-dd`.
   /// 每个本地自然日阅读的页数，键为 `yyyy-MM-dd`。
   final Map<String, int> dailyPages;
+
+  /// Seconds spent reading per local calendar day, keyed by `yyyy-MM-dd`.
+  /// 每个本地自然日的阅读时长（秒），键为 `yyyy-MM-dd`。
+  final Map<String, int> dailySeconds;
 
   static const int maxDays = 730;
 
@@ -28,15 +33,34 @@ class ReadingStats {
   int get totalPages =>
       dailyPages.values.fold<int>(0, (sum, pages) => sum + pages);
 
+  int get totalSeconds =>
+      dailySeconds.values.fold<int>(0, (sum, seconds) => sum + seconds);
+
   int pagesOn(DateTime date) => dailyPages[dateKey(date)] ?? 0;
 
+  int secondsOn(DateTime date) => dailySeconds[dateKey(date)] ?? 0;
+
   int pagesToday([DateTime? now]) => pagesOn(now ?? DateTime.now());
+
+  int secondsToday([DateTime? now]) => secondsOn(now ?? DateTime.now());
 
   int pagesThisWeek([DateTime? now]) {
     final today = _day(now ?? DateTime.now());
     final start = today.subtract(Duration(days: today.weekday - 1));
     var total = 0;
     for (final entry in dailyPages.entries) {
+      final day = parseKey(entry.key);
+      if (day == null || day.isBefore(start) || day.isAfter(today)) continue;
+      total += entry.value;
+    }
+    return total;
+  }
+
+  int secondsThisWeek([DateTime? now]) {
+    final today = _day(now ?? DateTime.now());
+    final start = today.subtract(Duration(days: today.weekday - 1));
+    var total = 0;
+    for (final entry in dailySeconds.entries) {
       final day = parseKey(entry.key);
       if (day == null || day.isBefore(start) || day.isAfter(today)) continue;
       total += entry.value;
@@ -54,13 +78,17 @@ class ReadingStats {
     ];
   }
 
+  /// Whether the user read anything on [date], counted by pages or by time.
+  /// 当天是否有阅读记录：翻过页或有时长都算。
+  bool isActiveOn(DateTime date) => pagesOn(date) > 0 || secondsOn(date) > 0;
+
   int currentStreak([DateTime? now]) {
     var cursor = _day(now ?? DateTime.now());
-    if (pagesOn(cursor) == 0) {
+    if (!isActiveOn(cursor)) {
       cursor = cursor.subtract(const Duration(days: 1));
     }
     var streak = 0;
-    while (pagesOn(cursor) > 0) {
+    while (isActiveOn(cursor)) {
       streak++;
       cursor = cursor.subtract(const Duration(days: 1));
     }
@@ -68,13 +96,12 @@ class ReadingStats {
   }
 
   int longestStreak() {
-    final days =
-        dailyPages.entries
-            .where((entry) => entry.value > 0)
-            .map((entry) => parseKey(entry.key))
-            .whereType<DateTime>()
-            .toList()
-          ..sort();
+    final days = <DateTime>{
+      for (final entry in dailyPages.entries)
+        if (entry.value > 0) ?parseKey(entry.key),
+      for (final entry in dailySeconds.entries)
+        if (entry.value > 0) ?parseKey(entry.key),
+    }.toList()..sort();
     if (days.isEmpty) return 0;
     var longest = 1;
     var current = 1;
@@ -97,6 +124,13 @@ class ReadingStats {
     _prune(when);
   }
 
+  void addSeconds(int seconds, DateTime when) {
+    if (seconds <= 0) return;
+    final key = dateKey(when);
+    dailySeconds[key] = (dailySeconds[key] ?? 0) + seconds;
+    _prune(when);
+  }
+
   /// Merges a backup using per-day maxima so restoring the same backup twice
   /// does not double-count pages.
   /// 按每日最大值合并备份，避免重复恢复同一备份时重复计数。
@@ -105,10 +139,15 @@ class ReadingStats {
       final existing = dailyPages[entry.key] ?? 0;
       if (entry.value > existing) dailyPages[entry.key] = entry.value;
     }
-    if (dailyPages.isNotEmpty) {
-      final newest = dailyPages.keys.reduce(
-        (a, b) => a.compareTo(b) >= 0 ? a : b,
-      );
+    for (final entry in other.dailySeconds.entries) {
+      final existing = dailySeconds[entry.key] ?? 0;
+      if (entry.value > existing) dailySeconds[entry.key] = entry.value;
+    }
+    if (dailyPages.isNotEmpty || dailySeconds.isNotEmpty) {
+      final newest = {
+        ...dailyPages.keys,
+        ...dailySeconds.keys,
+      }.reduce((a, b) => a.compareTo(b) >= 0 ? a : b);
       final date = parseKey(newest);
       if (date != null) _prune(date);
     }
@@ -116,6 +155,7 @@ class ReadingStats {
 
   Map<String, Object?> toJson() => {
     'dailyPages': Map<String, int>.from(dailyPages),
+    'dailySeconds': Map<String, int>.from(dailySeconds),
   };
 
   factory ReadingStats.fromJson(Map<String, Object?>? json) {
@@ -130,14 +170,27 @@ class ReadingStats {
         stats.dailyPages[key] = value;
       }
     }
+    final rawSeconds = json?['dailySeconds'];
+    if (rawSeconds is Map) {
+      for (final entry in rawSeconds.entries) {
+        final key = '${entry.key}';
+        if (parseKey(key) == null) continue;
+        final value = (entry.value as num?)?.toInt() ?? 0;
+        if (value <= 0) continue;
+        stats.dailySeconds[key] = value;
+      }
+    }
     return stats;
   }
 
   void _prune(DateTime now) {
     final cutoff = _day(now).subtract(const Duration(days: maxDays));
-    dailyPages.removeWhere((key, _) {
+    bool expired(String key) {
       final day = parseKey(key);
       return day == null || day.isBefore(cutoff);
-    });
+    }
+
+    dailyPages.removeWhere((key, _) => expired(key));
+    dailySeconds.removeWhere((key, _) => expired(key));
   }
 }

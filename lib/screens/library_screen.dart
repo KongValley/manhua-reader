@@ -5,14 +5,17 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:path/path.dart' as p;
 
 import '../models/comic_book.dart';
 import '../models/library_folder.dart';
 import '../models/library_settings.dart';
+import '../services/external_open_channel.dart';
 import '../services/folder_import.dart';
 import '../services/library_repository.dart';
-import '../services/pdf_password_cache.dart';
+import '../services/pdf_password_flow.dart';
+import '../services/pdf_password_store.dart';
 import '../services/saf_album_service.dart';
 import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
@@ -22,6 +25,7 @@ import '../widgets/backup_sheet.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/book_organization_dialog.dart';
 import '../widgets/folder_name_dialog.dart';
+import '../widgets/library_deletion_undo.dart';
 import '../widgets/library_storage_sheet.dart';
 import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reading_progress_bar.dart';
@@ -56,6 +60,19 @@ enum _ReadFilter {
   final String label;
 }
 
+enum _BatchAction {
+  move('移动到文件夹', Icons.drive_file_move_outline),
+  unread('标记未读', Icons.restart_alt_rounded),
+  series('设置系列', Icons.collections_bookmark_outlined),
+  addTags('添加标签', Icons.label_outline_rounded),
+  removeTags('移除标签', Icons.label_off_outlined);
+
+  const _BatchAction(this.label, this.icon);
+
+  final String label;
+  final IconData icon;
+}
+
 class _LibraryFilterResult {
   const _LibraryFilterResult({
     required this.sort,
@@ -82,9 +99,16 @@ class _ProgressState {
 }
 
 class LibraryScreen extends StatefulWidget {
-  const LibraryScreen({required this.repository, super.key});
+  const LibraryScreen({
+    required this.repository,
+    this.externalOpen,
+    this.externalRoutes,
+    super.key,
+  });
 
   final LibraryRepository repository;
+  final ExternalOpenChannel? externalOpen;
+  final ExternalOpenNavigatorObserver? externalRoutes;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -110,10 +134,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int _importSuccess = 0;
   int _importFailure = 0;
 
+  bool _externalRequested = false;
+  bool _externalScheduled = false;
+  bool _externalRunning = false;
+  ComicBook? _externalBook;
+
   LibraryRepository get _repository => widget.repository;
 
   @override
+  void initState() {
+    super.initState();
+    final externalOpen = widget.externalOpen;
+    if (externalOpen != null) {
+      widget.externalRoutes?.addListener(_scheduleExternalOpen);
+      externalOpen.listen(_externalFilesAvailable);
+      _externalFilesAvailable();
+    }
+  }
+
+  @override
   void dispose() {
+    widget.externalRoutes?.removeListener(_scheduleExternalOpen);
+    widget.externalOpen?.listen(null);
     _searchController.dispose();
     super.dispose();
   }
@@ -639,6 +681,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
 
     var imported = 0;
+    var unsavedPasswords = 0;
     var cancelled = false;
     final errors = <String>[];
     for (var i = 0; i < candidates.length; i++) {
@@ -665,21 +708,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
         }
       }
 
-      var passwordAttempts = 0;
-      String? lastPassword;
-      Future<String?> passwordProvider() async {
-        if (!mounted) return null;
-        final password = await showPdfPasswordDialog(
-          context,
-          fileName: name,
-          errorText: passwordAttempts > 0 ? '密码不正确，请重试' : null,
-        );
-        if (password != null) {
-          passwordAttempts++;
-          lastPassword = password;
-        }
-        return password;
-      }
+      final passwords = PdfPasswordFlow(
+        prompt: (errorText) async {
+          if (!mounted) return null;
+          return showPdfPasswordDialog(
+            context,
+            fileName: name,
+            errorText: errorText,
+          );
+        },
+      );
 
       String? stagedPath;
       try {
@@ -697,7 +735,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             originalName: name,
             folderId: candidate.folderId,
             onProgress: progress,
-            pdfPasswordProvider: passwordProvider,
+            pdfPasswordProvider: passwords.provide,
           );
         } else if (picked != null) {
           final path = picked.path;
@@ -707,7 +745,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               originalName: name,
               folderId: candidate.folderId,
               onProgress: progress,
-              pdfPasswordProvider: passwordProvider,
+              pdfPasswordProvider: passwords.provide,
             );
           } else {
             final totalSize = await picked.length();
@@ -718,7 +756,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               totalSize: totalSize,
               folderId: candidate.folderId,
               onProgress: progress,
-              pdfPasswordProvider: passwordProvider,
+              pdfPasswordProvider: passwords.provide,
             );
           }
         } else if (candidate.path != null) {
@@ -727,12 +765,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
             originalName: name,
             folderId: candidate.folderId,
             onProgress: progress,
-            pdfPasswordProvider: passwordProvider,
+            pdfPasswordProvider: passwords.provide,
           );
         } else {
           throw ImportException('无法读取文件');
         }
-        PdfPasswordCache.put(book.filePath, lastPassword);
+        if (!await passwords.onSuccess(book)) unsavedPasswords++;
         imported++;
       } on ImportException catch (error) {
         errors.add('$name：${error.message}');
@@ -765,6 +803,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final parts = <String>[];
       if (imported > 0) parts.add('已导入 $imported 本');
       if (cancelled) parts.add('已取消剩余文件');
+      if (unsavedPasswords > 0) parts.add('$unsavedPasswords 本的密码未能保存');
       _toast(parts.join('，'));
     }
     if (errors.isNotEmpty) {
@@ -778,6 +817,134 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _cancelImport = true;
       _importLabel = '正在取消剩余导入…';
     });
+  }
+
+  void _externalFilesAvailable() {
+    _externalRequested = true;
+    _scheduleExternalOpen();
+  }
+
+  void _scheduleExternalOpen() {
+    if (!mounted ||
+        !_externalRequested ||
+        _externalScheduled ||
+        _externalRunning ||
+        _importing) {
+      return;
+    }
+    _externalScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _externalScheduled = false;
+      if (mounted) unawaited(_processExternalOpen());
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _processExternalOpen() async {
+    final channel = widget.externalOpen;
+    final routes = widget.externalRoutes;
+    final top = routes?.topRoute ?? ModalRoute.of(context);
+    if (channel == null ||
+        _externalRunning ||
+        _importing ||
+        top is! PageRoute<dynamic> ||
+        !top.isCurrent) {
+      return;
+    }
+
+    _externalRunning = true;
+    ExternalOpenRequest? request;
+    try {
+      if (_externalBook == null) {
+        _externalRequested = false;
+        request = await channel.takeNext();
+        if (request == null || !mounted) return;
+        _externalRequested = true;
+        if (request.path == null) {
+          throw ImportException(request.error ?? '无法读取文件');
+        }
+        _externalBook = await _importExternalBook(request);
+      }
+
+      final current = routes?.topRoute ?? top;
+      if (!mounted || current is! PageRoute<dynamic> || !current.isCurrent) {
+        return;
+      }
+      // Let the former reader dispose before the new one takes its channels.
+      // 等待旧阅读器释放频道后，再启动新的阅读器。
+      if (current.settings.name == readerRouteName) {
+        current.navigator!.pop();
+        await current.completed;
+      }
+      if (!mounted) return;
+      final nextTop = routes?.topRoute;
+      if (nextTop != null && nextTop is! PageRoute<dynamic>) return;
+      final book = _externalBook!;
+      _externalBook = null;
+      unawaited(openComicBook(context, book: book, repository: _repository));
+    } on MissingPluginException {
+      _externalRequested = false;
+    } catch (error) {
+      _externalBook = null;
+      if (mounted) {
+        final name = request?.name;
+        await _showImportErrors([
+          if (name == null) '$error' else '$name：$error',
+        ]);
+      }
+    } finally {
+      await request?.release();
+      _externalRunning = false;
+      if (mounted && (routes?.topRoute ?? top) is PageRoute<dynamic>) {
+        _scheduleExternalOpen();
+      }
+    }
+  }
+
+  Future<ComicBook> _importExternalBook(ExternalOpenRequest request) async {
+    setState(() {
+      _importing = true;
+      _importLabel = '正在打开 ${request.name}';
+      _importProgress = 0;
+      _importSuccess = 0;
+      _importFailure = 0;
+    });
+    final passwords = PdfPasswordFlow(
+      prompt: (errorText) async {
+        if (!mounted) return null;
+        return showPdfPasswordDialog(
+          context,
+          fileName: request.name,
+          errorText: errorText,
+        );
+      },
+    );
+    try {
+      final book = await _repository.importFile(
+        request.path!,
+        originalName: request.name,
+        reuseIdenticalBook: true,
+        pdfPasswordProvider: passwords.provide,
+        onProgress: (label, progress) {
+          if (!mounted) return;
+          setState(() {
+            _importLabel = label;
+            _importProgress = progress;
+          });
+        },
+      );
+      if (!await passwords.onSuccess(book) && mounted) {
+        _toast('密码未能保存');
+      }
+      return book;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _importing = false;
+          _importProgress = 0;
+        });
+      }
+    }
   }
 
   Future<void> _openBook(ComicBook book, {bool continueReading = false}) async {
@@ -799,6 +966,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _showBookActions(ComicBook book) async {
     final missing = !_repository.fileExists(book);
+    final finished = LibraryRepository.isFinished(book);
     final organization = [
       if (book.series != null) '系列：${book.series}',
       if (book.tags.isNotEmpty) book.tags.map((tag) => '#$tag').join(' '),
@@ -973,6 +1141,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ),
                   onTap: () => Navigator.of(context).pop('organize'),
                 ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.drive_file_move_outline),
+                  title: const Text('移动到文件夹'),
+                  subtitle: Text(
+                    _repository.folderById(book.folderId)?.name ?? '书架根目录',
+                  ),
+                  onTap: () => Navigator.of(context).pop('move'),
+                ),
+                if (book.pageCount > 0 && !finished)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.done_all_rounded),
+                    title: const Text('标记已读'),
+                    onTap: () => Navigator.of(context).pop('markRead'),
+                  ),
+                if (book.hasStarted || book.lastPage != 0)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.restart_alt_rounded),
+                    title: const Text('标记未读'),
+                    onTap: () => Navigator.of(context).pop('markUnread'),
+                  ),
+                _RememberedPasswordAction(
+                  book: book,
+                  onTap: () => Navigator.of(context).pop('forgetPassword'),
+                ),
                 if (missing)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -1039,6 +1234,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
         await _showRenameDialog(book);
       case 'organize':
         await _showOrganizationDialog(book);
+      case 'move':
+        await _moveBooks([book]);
+      case 'markRead':
+        _markBooks([book], read: true);
+      case 'markUnread':
+        _markBooks([book], read: false);
+      case 'forgetPassword':
+        final forgotten = await PdfPasswordStore.forget(book);
+        if (mounted) _toast(forgotten ? '已忘记 PDF 密码' : '无法移除已保存的 PDF 密码');
       case 'relink':
         if (book.format.isAlbum) {
           await _relinkAlbum(book);
@@ -1110,40 +1314,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _toast('文件已丢失；请先重新定位文件');
       return;
     }
-    var attempts = 0;
-    String? lastPassword;
-    Future<String?> provider() async {
-      attempts++;
-      if (attempts == 1) {
-        final cached = PdfPasswordCache.get(book.filePath);
-        if (cached != null) {
-          lastPassword = cached;
-          return cached;
-        }
-      }
-      if (!mounted) return null;
-      final password = await showPdfPasswordDialog(
-        context,
-        fileName: book.title,
-        errorText: attempts > 1 ? '密码不正确，请重试' : null,
-      );
-      if (password != null) lastPassword = password;
-      return password;
-    }
+    final passwords = PdfPasswordFlow(
+      book: book,
+      prompt: (errorText) async {
+        if (!mounted) return null;
+        return showPdfPasswordDialog(
+          context,
+          fileName: book.title,
+          errorText: errorText,
+        );
+      },
+    );
 
     try {
       final ok = await _runWithProgress<bool>(
         '正在生成封面…',
         (onProgress) => _repository.regenerateCover(
           book,
-          pdfPasswordProvider: provider,
+          pdfPasswordProvider: passwords.provide,
           onProgress: onProgress,
         ),
       );
+      final passwordSaved = ok != true || await passwords.onSuccess(book);
       if (!mounted) return;
       if (ok == true) {
-        PdfPasswordCache.put(book.filePath, lastPassword);
-        _toast('封面已更新');
+        _toast(passwordSaved ? '封面已更新' : '封面已更新，密码未能保存');
       } else {
         _toast('封面生成失败（可能需要密码或文件损坏）');
       }
@@ -1167,27 +1362,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (picked == null || !mounted) return;
     final selected = picked;
 
-    final oldPath = book.filePath;
-    var attempts = 0;
-    String? lastPassword;
-    Future<String?> provider() async {
-      attempts++;
-      if (attempts == 1) {
-        final cached = PdfPasswordCache.get(oldPath);
-        if (cached != null) {
-          lastPassword = cached;
-          return cached;
-        }
-      }
-      if (!mounted) return null;
-      final password = await showPdfPasswordDialog(
-        context,
-        fileName: selected.name,
-        errorText: attempts > 1 ? '密码不正确，请重试' : null,
-      );
-      if (password != null) lastPassword = password;
-      return password;
-    }
+    final passwords = PdfPasswordFlow(
+      prompt: (errorText) async {
+        if (!mounted) return null;
+        return showPdfPasswordDialog(
+          context,
+          fileName: selected.name,
+          errorText: errorText,
+        );
+      },
+    );
 
     File? staged;
     try {
@@ -1225,15 +1409,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
         return await _repository.relinkFile(
           book,
           sourcePath,
-          pdfPasswordProvider: provider,
+          pdfPasswordProvider: passwords.provide,
           onProgress: (label, value) => onProgress(label, 0.3 + value * 0.7),
         );
       });
-      if (!mounted) return;
       if (result != null) {
-        PdfPasswordCache.remove(oldPath);
-        PdfPasswordCache.put(book.filePath, lastPassword);
-        _toast('已重新定位《${book.title}》');
+        final passwordSaved = await passwords.onSuccess(result);
+        if (!mounted) return;
+        _toast(
+          passwordSaved
+              ? '已重新定位《${book.title}》'
+              : '已重新定位《${book.title}》，密码未能保存',
+        );
       }
     } on ImportException catch (error) {
       if (mounted) _toast(error.message);
@@ -1288,8 +1475,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _deleteBook(ComicBook book) async {
     final confirmed = await _confirmDelete(1);
     if (confirmed != true || !mounted) return;
-    await _repository.deleteBook(book);
-    if (mounted) _toast('已删除《${book.title}》');
+    _repository.deleteBooksLater([book]);
   }
 
   List<ComicBook> get _selectedBooks => _repository.books
@@ -1346,27 +1532,156 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     final confirmed = await _confirmDelete(selected.length);
     if (confirmed != true || !mounted) return;
-    await _repository.deleteBooks(selected);
-    if (!mounted) return;
-    setState(() {
-      _selectionMode = false;
-      _selectedIds.clear();
-    });
-    _toast('已删除 ${selected.length} 本漫画');
+    _repository.deleteBooksLater(selected);
+    _exitSelection();
   }
 
   void _markSelectedRead() {
     final selected = _selectedBooks;
-    if (selected.isEmpty) {
+    _exitSelection();
+    _markBooks(selected, read: true);
+  }
+
+  void _markBooks(List<ComicBook> books, {required bool read}) {
+    final label = read ? '已读' : '未读';
+    final changed = read
+        ? _repository.markBooksRead(books)
+        : _repository.markBooksUnread(books);
+    _toast(changed == 0 ? '阅读状态没有变化' : '已将 $changed 本标记为$label');
+  }
+
+  Future<void> _moveBooks(List<ComicBook> books) async {
+    const newFolder = '__new_folder__';
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('移动到文件夹'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(dialogContext).pop(''),
+            child: const Text('书架根目录'),
+          ),
+          for (final folder in _repository.folders)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(dialogContext).pop(folder.id),
+              child: Text(folder.name),
+            ),
+          const Divider(height: 8),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(dialogContext).pop(newFolder),
+            child: const Row(
+              children: [
+                Icon(Icons.create_new_folder_outlined, size: 20),
+                SizedBox(width: 10),
+                Text('新建文件夹'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || picked == null) return;
+    if (picked == newFolder) {
+      final name = await showFolderNameDialog(
+        context,
+        initialName: '',
+        title: '新建文件夹',
+      );
+      if (!mounted || name == null) return;
+      final folder = _repository.ensureFolder(name);
+      final changed = _repository.moveBooksToFolder(books, folder.id);
       _exitSelection();
+      _toast(changed == 0 ? '未移动任何漫画' : '已将 $changed 本移动到${folder.name}');
       return;
     }
-    final changed = _repository.markBooksRead(selected);
-    setState(() {
-      _selectionMode = false;
-      _selectedIds.clear();
-    });
-    _toast(changed == 0 ? '选中的漫画已经是已读状态' : '已将 $changed 本标记为已读');
+    final folderId = picked.isEmpty ? null : picked;
+    final changed = _repository.moveBooksToFolder(books, folderId);
+    _exitSelection();
+    final name = _repository.folderById(folderId)?.name ?? '书架根目录';
+    _toast(changed == 0 ? '未移动任何漫画' : '已将 $changed 本移动到$name');
+  }
+
+  Future<void> _showBatchActions() async {
+    final selected = _selectedBooks;
+    if (selected.isEmpty) return;
+    final action = await showModalBottomSheet<_BatchAction>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final action in _BatchAction.values)
+                ListTile(
+                  leading: Icon(action.icon),
+                  title: Text(action.label),
+                  onTap: () => Navigator.of(sheetContext).pop(action),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _BatchAction.move:
+        await _moveBooks(selected);
+      case _BatchAction.unread:
+        _exitSelection();
+        _markBooks(selected, read: false);
+      case _BatchAction.series:
+      case _BatchAction.addTags:
+      case _BatchAction.removeTags:
+        await _editBatchOrganization(action, selected);
+    }
+  }
+
+  Future<void> _editBatchOrganization(
+    _BatchAction action,
+    List<ComicBook> books,
+  ) async {
+    final series = action == _BatchAction.series;
+    var value = '';
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(action.label),
+        content: TextField(
+          autofocus: true,
+          maxLength: series ? 60 : null,
+          decoration: InputDecoration(
+            labelText: series ? '系列名称' : '标签',
+            helperText: series ? '留空可清除系列' : '可用逗号、顿号或换行分隔多个标签',
+          ),
+          keyboardType: series ? TextInputType.text : TextInputType.multiline,
+          maxLines: series ? 1 : 3,
+          onChanged: (text) => value = text,
+          onSubmitted: series
+              ? (_) => Navigator.of(dialogContext).pop(value)
+              : null,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(value),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || result == null) return;
+    final tags = result.split(RegExp(r'[,，、\n]'));
+    final changed = switch (action) {
+      _BatchAction.series => _repository.setBooksSeries(books, result),
+      _BatchAction.addTags => _repository.addBooksTags(books, tags),
+      _BatchAction.removeTags => _repository.removeBooksTags(books, tags),
+      _ => 0,
+    };
+    _pruneSelectionToVisible();
+    _toast(changed == 0 ? '系列与标签没有变化' : '已更新 $changed 本漫画');
   }
 
   Future<bool?> _confirmDelete(int count) {
@@ -1375,9 +1690,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
-        content: const Text(
-          '普通漫画只删除应用内副本、封面及相关缓存；引用型相册只移除书架条目，不会删除原文件夹。原文件均不受影响。',
-        ),
+        content: const Text('删除后可以短暂撤销。撤销期限结束后会清理书架中的应用内副本和封面，原文件会保留。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -1423,7 +1736,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => LibraryStorageSheet(repository: _repository),
+      builder: (context) => LibraryStorageSheet(
+        repository: _repository,
+        externalOpen: widget.externalOpen,
+      ),
     );
   }
 
@@ -1460,7 +1776,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _showSeries() async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (context) => SeriesScreen(repository: _repository),
+        builder: (context) => SeriesScreen(
+          repository: _repository,
+          onBookActions: _showBookActions,
+        ),
       ),
     );
   }
@@ -1544,7 +1863,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.6.0'),
+              Text('版本 1.7.0'),
             ],
           ),
         ),
@@ -1579,6 +1898,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    _scheduleExternalOpen();
     final content = PopScope<void>(
       canPop: !_importing && !_selectionMode,
       onPopInvokedWithResult: (didPop, result) {
@@ -1586,6 +1906,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         if (_selectionMode) _exitSelection();
       },
       child: Scaffold(
+        bottomNavigationBar: LibraryDeletionUndo(repository: _repository),
         body: Stack(
           children: [
             const Positioned.fill(child: _LibraryBackground()),
@@ -1706,6 +2027,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   builder: (context) => FolderScreen(
                                     repository: _repository,
                                     folderId: folder.id,
+                                    onBookActions: _showBookActions,
                                   ),
                                 ),
                               ),
@@ -1948,6 +2270,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       onFavorite: _favoriteSelected,
                       onPin: _pinSelected,
                       onMarkRead: _markSelectedRead,
+                      onMore: _showBatchActions,
                       onDelete: _deleteSelected,
                     );
                   },
@@ -2287,7 +2610,7 @@ class _LibraryToolbar extends StatelessWidget {
                     textInputAction: TextInputAction.search,
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: '搜索书名或文件名',
+                      hintText: '搜索书名或拼音首字母',
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -3578,6 +3901,46 @@ class _SelectionMark extends StatelessWidget {
   }
 }
 
+/// Shows the forget-password action only when this device remembers one.
+/// 仅当此设备保存过密码时显示「忘记 PDF 密码」。
+class _RememberedPasswordAction extends StatefulWidget {
+  const _RememberedPasswordAction({required this.book, required this.onTap});
+
+  final ComicBook book;
+  final VoidCallback onTap;
+
+  @override
+  State<_RememberedPasswordAction> createState() =>
+      _RememberedPasswordActionState();
+}
+
+class _RememberedPasswordActionState extends State<_RememberedPasswordAction> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final book = widget.book;
+    if (book.format != ComicFormat.pdf || !PdfPasswordStore.isSupported) return;
+    unawaited(
+      PdfPasswordStore.hasRemembered(book).then((remembered) {
+        if (mounted && remembered) setState(() => _visible = true);
+      }),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_visible) return const SizedBox.shrink();
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: const Icon(Icons.lock_reset_rounded),
+      title: const Text('忘记 PDF 密码'),
+      onTap: widget.onTap,
+    );
+  }
+}
+
 class _SelectionBar extends StatelessWidget {
   const _SelectionBar({
     required this.selectedCount,
@@ -3589,6 +3952,7 @@ class _SelectionBar extends StatelessWidget {
     required this.onFavorite,
     required this.onPin,
     required this.onMarkRead,
+    required this.onMore,
     required this.onDelete,
   });
 
@@ -3601,6 +3965,7 @@ class _SelectionBar extends StatelessWidget {
   final VoidCallback onFavorite;
   final VoidCallback onPin;
   final VoidCallback onMarkRead;
+  final VoidCallback onMore;
   final VoidCallback onDelete;
 
   @override
@@ -3650,6 +4015,11 @@ class _SelectionBar extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
+                TextButton.icon(
+                  onPressed: hasSelection ? onMore : null,
+                  icon: const Icon(Icons.more_horiz_rounded, size: 18),
+                  label: const Text('批量操作'),
+                ),
                 TextButton(
                   onPressed: onSelectAll,
                   style: TextButton.styleFrom(

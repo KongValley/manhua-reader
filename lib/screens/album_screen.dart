@@ -8,6 +8,7 @@ import '../formats/album_comic_source.dart';
 import '../formats/comic_source.dart';
 import '../formats/comic_source_factory.dart';
 import '../models/comic_book.dart';
+import '../services/external_open_channel.dart';
 import '../services/library_repository.dart';
 import '../services/saf_album_service.dart';
 import '../services/saf_folder_service.dart';
@@ -196,6 +197,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
   void _openPage(int page) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
+        settings: const RouteSettings(name: readerRouteName),
         builder: (context) => ReaderScreen(
           book: widget.book,
           repository: widget.repository,

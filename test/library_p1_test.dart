@@ -71,7 +71,7 @@ void main() {
     final decoded = jsonDecode(
       await paths.libraryFile.readAsString(),
     ) as Map<String, dynamic>;
-    expect(decoded['version'], 4);
+    expect(decoded['version'], 5);
     expect(decoded['stats'], isA<Map<String, dynamic>>());
     expect(decoded['library'], {'view': 'list', 'sort': 'title'});
 

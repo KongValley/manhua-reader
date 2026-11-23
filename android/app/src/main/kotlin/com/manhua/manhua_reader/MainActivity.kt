@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Bundle
 import android.provider.DocumentsContract
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -15,15 +16,57 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
+    private companion object {
+        const val STATE_OPEN_KEY = "manhua.openKey"
+    }
+
     private val channelName = "manhua/saf"
     private val pickDirectoryRequest = 7281
     private var pendingPick: MethodChannel.Result? = null
     private val ioExecutor = Executors.newSingleThreadExecutor()
+    private val externalOpen = ExternalOpen(this, ioExecutor)
     private var readerChannel: MethodChannel? = null
     private var volumeKeysEnabled = false
+    private var handledOpenKey: String? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        handledOpenKey = savedInstanceState?.getString(STATE_OPEN_KEY)
+        val key = openKey(intent)
+        // A restored activity can still receive a brand-new VIEW intent after
+        // the process was killed; only skip intents this activity already saw.
+        // 被系统重建的 Activity 仍可能收到全新的 VIEW Intent；只跳过已经处理过的
+        // 同一个 Intent。
+        if (key != null && key != handledOpenKey) {
+            externalOpen.receive(intent)
+            handledOpenKey = key
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        externalOpen.receive(intent)
+        handledOpenKey = openKey(intent) ?: handledOpenKey
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        handledOpenKey?.let { outState.putString(STATE_OPEN_KEY, it) }
+    }
+
+    private fun openKey(intent: Intent?): String? =
+        if (intent?.action == Intent.ACTION_VIEW) {
+            intent.toUri(Intent.URI_INTENT_SCHEME)
+        } else {
+            null
+        }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        val messenger = flutterEngine.dartExecutor.binaryMessenger
+        externalOpen.attach(messenger)
+        PdfPasswordStore.register(applicationContext, messenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -422,6 +465,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        externalOpen.detach()
         ioExecutor.shutdown()
         super.onDestroy()
     }

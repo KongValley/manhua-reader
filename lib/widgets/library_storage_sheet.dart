@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/comic_book.dart';
 import '../models/library_storage_report.dart';
+import '../services/external_open_channel.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
@@ -9,9 +10,14 @@ import '../utils/format.dart';
 /// Bottom sheet that summarises disk usage and reclaims cache/orphan files.
 /// 汇总磁盘占用并清理缓存 / 无引用文件的底部面板。
 class LibraryStorageSheet extends StatefulWidget {
-  const LibraryStorageSheet({required this.repository, super.key});
+  const LibraryStorageSheet({
+    required this.repository,
+    this.externalOpen,
+    super.key,
+  });
 
   final LibraryRepository repository;
+  final ExternalOpenChannel? externalOpen;
 
   @override
   State<LibraryStorageSheet> createState() => _LibraryStorageSheetState();
@@ -23,11 +29,43 @@ class _LibraryStorageSheetState extends State<LibraryStorageSheet> {
   bool _cleaning = false;
   String? _error;
   int? _lastFreed;
+  bool? _associationsRegistered;
+  bool _updatingAssociations = false;
+  String? _associationError;
 
   @override
   void initState() {
     super.initState();
     _load();
+    if (ExternalOpenChannel.supportsAssociations && widget.externalOpen != null) {
+      _loadAssociations();
+    }
+  }
+
+  Future<void> _loadAssociations() async {
+    try {
+      final registered = await widget.externalOpen!.associationsRegistered();
+      if (mounted) {
+        setState(() => _associationsRegistered = registered);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _associationError = '无法读取文件关联状态');
+    }
+  }
+
+  Future<void> _updateAssociations(bool registered) async {
+    setState(() {
+      _updatingAssociations = true;
+      _associationError = null;
+    });
+    try {
+      await widget.externalOpen!.setAssociationsRegistered(registered);
+      if (mounted) setState(() => _associationsRegistered = registered);
+    } catch (_) {
+      if (mounted) setState(() => _associationError = '无法更新文件关联');
+    } finally {
+      if (mounted) setState(() => _updatingAssociations = false);
+    }
   }
 
   Future<void> _load() async {
@@ -178,6 +216,21 @@ class _LibraryStorageSheetState extends State<LibraryStorageSheet> {
                   ),
                 ],
               ),
+              if (ExternalOpenChannel.supportsAssociations &&
+                  widget.externalOpen != null) ...[
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('注册 Windows「打开方式」'),
+                  subtitle: Text(
+                    _associationError ?? '将漫阅添加到 PDF、MOBI、CBZ 的候选程序',
+                  ),
+                  value: _associationsRegistered ?? false,
+                  onChanged: _associationsRegistered == null ||
+                          _updatingAssociations
+                      ? null
+                      : _updateAssociations,
+                ),
+              ],
               const SizedBox(height: 18),
               if (_loading)
                 const Padding(

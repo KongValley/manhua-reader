@@ -5,10 +5,15 @@ import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 
 class PaperSheet {
-  const PaperSheet(this.image, this.rect);
+  const PaperSheet(this.image, this.rect, {this.sourceRect});
 
   final ui.Image image;
   final Rect rect;
+  final Rect? sourceRect;
+
+  Rect get imageRect =>
+      sourceRect ??
+      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
 }
 
 class PaperTurn {
@@ -71,8 +76,8 @@ class PaperCurlPainter extends CustomPainter {
     ].map((sheet) => sheet.rect).reduce((a, b) => a.expandToInclude(b));
     _drawCastShadow(canvas, paper, bookBounds);
     if (back == null) canvas.clipRect(front.rect);
-    _drawFace(canvas, paper, front.image, backFacing: false);
-    _drawFace(canvas, paper, back?.image, backFacing: true);
+    _drawFace(canvas, paper, front, backFacing: false);
+    _drawFace(canvas, paper, back, backFacing: true);
     canvas.restore();
   }
 
@@ -138,16 +143,13 @@ class _PaperCurve {
 void _drawSheet(Canvas canvas, PaperSheet sheet, double opacity) {
   canvas.drawImageRect(
     sheet.image,
-    _imageRect(sheet.image),
+    sheet.imageRect,
     sheet.rect,
     Paint()
       ..color = Color.fromRGBO(255, 255, 255, opacity)
       ..filterQuality = FilterQuality.low,
   );
 }
-
-Rect _imageRect(ui.Image image) =>
-    Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
 
 void _drawCastShadow(Canvas canvas, _PaperCurve paper, Rect bounds) {
   final top = paper.pointAt(paper.faceEdge(0), 0);
@@ -212,9 +214,11 @@ final _identity = Float64List.fromList(const [
 void _drawFace(
   Canvas canvas,
   _PaperCurve paper,
-  ui.Image? image, {
+  PaperSheet? sheet, {
   required bool backFacing,
 }) {
+  final image = sheet?.image;
+  final imageRect = sheet?.imageRect;
   final points = <Offset>[];
   final colors = <Color>[];
   final texture = image == null ? null : <Offset>[];
@@ -240,7 +244,10 @@ void _drawFace(
         final level = (shade * 255).round();
         colors.add(Color.fromARGB(255, level, level, level));
         texture!.add(
-          Offset((followsU ? u : 1 - u) * image.width, v * image.height),
+          Offset(
+            imageRect!.left + (followsU ? u : 1 - u) * imageRect.width,
+            imageRect.top + v * imageRect.height,
+          ),
         );
       }
     }

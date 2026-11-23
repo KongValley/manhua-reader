@@ -3,7 +3,9 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../formats/comic_page_crop.dart';
 import '../formats/comic_source.dart';
+import 'comic_page_image.dart';
 import 'paper_curl.dart';
 
 /// Keeps the PageView in charge of gestures while painting the turn above it.
@@ -17,7 +19,9 @@ class PaperPageView extends StatefulWidget {
     required this.wrapPage,
     required this.onSettled,
     this.spreads,
+    this.cropController,
     this.paperAnimation = true,
+    this.scrollable = true,
     super.key,
   });
 
@@ -26,7 +30,12 @@ class PaperPageView extends StatefulWidget {
   final bool rightToLeft;
   final Color background;
   final List<List<int>>? spreads;
+  final ComicPageCropController? cropController;
   final bool paperAnimation;
+
+  /// Whether swipes turn pages. Programmatic turns keep working when false.
+  /// 是否允许滑动翻页；为 false 时仍可通过程序翻页。
+  final bool scrollable;
   final Widget Function(Widget child, ValueChanged<bool> onZoomChanged)
   wrapPage;
   final ValueChanged<int> onSettled;
@@ -46,6 +55,29 @@ class _PaperPageViewState extends State<PaperPageView> {
   bool _pinching = false;
 
   int get _slotCount => widget.spreads?.length ?? widget.source.pageCount;
+
+  ComicPageCropController? get _crop =>
+      identical(widget.cropController?.source, widget.source)
+      ? widget.cropController
+      : null;
+
+  @override
+  void initState() {
+    super.initState();
+    _crop?.addListener(_cropChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant PaperPageView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.cropController != widget.cropController ||
+        !identical(oldWidget.source, widget.source)) {
+      oldWidget.cropController?.removeListener(_cropChanged);
+      _crop?.addListener(_cropChanged);
+    }
+  }
+
+  void _cropChanged() => setState(() {});
 
   double? get _page {
     final controller = widget.controller;
@@ -84,7 +116,9 @@ class _PaperPageViewState extends State<PaperPageView> {
     final ordered = widget.rightToLeft ? pages.reversed : pages;
     final aspects = [
       for (final page in ordered)
-        ComicSource.safePageSize(widget.source.pageSize(page)).aspectRatio,
+        (_crop?.pageSize(page) ??
+                ComicSource.safePageSize(widget.source.pageSize(page)))
+            .aspectRatio,
     ];
     const gap = 6.0;
     final totalGap = gap * (aspects.length - 1);
@@ -107,9 +141,17 @@ class _PaperPageViewState extends State<PaperPageView> {
   List<PaperSheet>? _sheets(int slot, Size viewport) {
     final sheets = <PaperSheet>[];
     for (final placement in _layout(slot, viewport)) {
-      final image = _images[placement.page]?._image;
-      if (image == null || placement.rect.isEmpty) return null;
-      sheets.add(PaperSheet(image, placement.rect));
+      final frame = _images[placement.page];
+      if (frame == null ||
+          !identical(frame.widget.source, widget.source) ||
+          placement.rect.isEmpty) {
+        return null;
+      }
+      final image = frame._image;
+      if (image == null) return null;
+      sheets.add(
+        PaperSheet(image, placement.rect, sourceRect: frame._imageRect),
+      );
     }
     return sheets;
   }
@@ -160,6 +202,7 @@ class _PaperPageViewState extends State<PaperPageView> {
 
   @override
   void dispose() {
+    _crop?.removeListener(_cropChanged);
     _paintUpdates.dispose();
     super.dispose();
   }
@@ -175,7 +218,9 @@ class _PaperPageViewState extends State<PaperPageView> {
           child: PageView.builder(
             controller: widget.controller,
             reverse: widget.rightToLeft,
-            physics: const PageScrollPhysics(),
+            physics: widget.scrollable
+                ? const PageScrollPhysics()
+                : const NeverScrollableScrollPhysics(),
             allowImplicitScrolling: true,
             itemCount: _slotCount,
             itemBuilder: (context, slot) {
@@ -187,11 +232,18 @@ class _PaperPageViewState extends State<PaperPageView> {
                         rect: placement.rect,
                         child: animated
                             ? _TurnPageImage(
-                                key: ValueKey(placement.page),
+                                key: ValueKey((widget.source, placement.page)),
                                 view: this,
+                                source: widget.source,
                                 page: placement.page,
+                                cropController: _crop,
                               )
-                            : widget.source.buildPage(context, placement.page),
+                            : ComicPageImage(
+                                key: ValueKey((widget.source, placement.page)),
+                                source: widget.source,
+                                index: placement.page,
+                                cropController: _crop,
+                              ),
                       ),
                   ],
                 ),
@@ -248,10 +300,18 @@ class _PaperPageViewState extends State<PaperPageView> {
 }
 
 class _TurnPageImage extends StatefulWidget {
-  const _TurnPageImage({required this.view, required this.page, super.key});
+  const _TurnPageImage({
+    required this.view,
+    required this.source,
+    required this.page,
+    required this.cropController,
+    super.key,
+  });
 
   final _PaperPageViewState view;
+  final ComicSource source;
   final int page;
+  final ComicPageCropController? cropController;
 
   @override
   State<_TurnPageImage> createState() => _TurnPageImageState();
@@ -259,11 +319,16 @@ class _TurnPageImage extends StatefulWidget {
 
 class _TurnPageImageState extends State<_TurnPageImage> {
   ui.Image? _image;
+  Rect? _imageRect;
 
-  void _shareImage(ui.Image image) {
-    if (_image?.isCloneOf(image) == true) return;
-    _image?.dispose();
-    _image = image.clone();
+  void _shareImage(ui.Image image, Rect imageRect) {
+    final sameImage = _image?.isCloneOf(image) == true;
+    if (sameImage && _imageRect == imageRect) return;
+    if (!sameImage) {
+      _image?.dispose();
+      _image = image.clone();
+    }
+    _imageRect = imageRect;
     widget.view._images[widget.page] = this;
     widget.view._paintUpdates.value++;
   }
@@ -279,9 +344,10 @@ class _TurnPageImageState extends State<_TurnPageImage> {
   }
 
   @override
-  Widget build(BuildContext context) => widget.view.widget.source.buildPage(
-    context,
-    widget.page,
-    onImage: _shareImage,
+  Widget build(BuildContext context) => ComicPageImage(
+    source: widget.source,
+    index: widget.page,
+    cropController: widget.cropController,
+    onFrame: _shareImage,
   );
 }

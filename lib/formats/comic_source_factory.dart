@@ -13,12 +13,18 @@ import 'pdf_comic_source.dart';
 import 'zip/zip_archive_reader.dart';
 
 class ComicSourceFactory {
+  /// Test seam: when set, [open] uses it instead of reading real files.
+  /// 测试替身：设置后 [open] 不再读取真实文件，而是调用它。
+  static Future<ComicSource> Function(ComicBook book)? debugOpener;
+
   static Future<ComicSource> open(
     ComicBook book, {
     PdfPasswordProvider? passwordProvider,
     AlbumSortField? albumSort,
     bool? albumSortDescending,
   }) async {
+    final opener = debugOpener;
+    if (opener != null) return opener(book);
     if (book.format == ComicFormat.album) {
       try {
         return await AlbumComicSource.open(

@@ -3,6 +3,8 @@
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
+#include <algorithm>
+
 #include "resource.h"
 
 namespace {
@@ -15,8 +17,6 @@ namespace {
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
-
-constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
 /// Registry key for app theme preference.
 ///
@@ -31,10 +31,75 @@ static int g_active_window_count = 0;
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 
-// Scale helper to convert logical scaler values to physical using passed in
-// scale factor
-int Scale(int source, double scale_factor) {
-  return static_cast<int>(source * scale_factor);
+constexpr wchar_t kWindowPlacementKey[] = L"Software\\ManhuaReader";
+constexpr wchar_t kWindowPlacementValue[] = L"WindowPlacement";
+
+struct SavedPlacement {
+  RECT bounds;
+  DWORD maximized;
+};
+
+// Store normal bounds in screen coordinates, including on secondary displays.
+// 用屏幕坐标保存窗口的普通尺寸和位置，包括在副显示器上时。
+void SavePlacement(HWND window) {
+  WINDOWPLACEMENT placement = {sizeof(placement)};
+  if (!GetWindowPlacement(window, &placement)) return;
+  // rcNormalPosition is already in virtual-screen coordinates. Converting it
+  // by the work-area offset would shift the window on every launch whenever
+  // the taskbar sits on the top or left edge.
+  // rcNormalPosition 已经是虚拟屏幕坐标；再按工作区偏移换算，会在任务栏
+  // 位于顶部或左侧时让窗口每次启动都平移一段。
+  SavedPlacement saved = {placement.rcNormalPosition, 0};
+  saved.maximized = placement.showCmd == SW_SHOWMAXIMIZED ||
+                     (placement.flags & WPF_RESTORETOMAXIMIZED) != 0;
+  RegSetKeyValueW(HKEY_CURRENT_USER, kWindowPlacementKey, kWindowPlacementValue,
+                   REG_BINARY, &saved, sizeof(saved));
+}
+
+SavedPlacement StartupPlacement(const Win32Window::Size& size,
+                                bool remember_placement) {
+  SavedPlacement saved = {};
+  HMONITOR monitor = nullptr;
+  if (remember_placement) {
+    DWORD bytes = sizeof(saved);
+    if (RegGetValueW(HKEY_CURRENT_USER, kWindowPlacementKey,
+                     kWindowPlacementValue, RRF_RT_REG_BINARY, nullptr,
+                     &saved, &bytes) == ERROR_SUCCESS &&
+        bytes == sizeof(saved) && saved.bounds.right > saved.bounds.left &&
+        saved.bounds.bottom > saved.bounds.top) {
+      monitor = MonitorFromRect(&saved.bounds, MONITOR_DEFAULTTONULL);
+    }
+  }
+
+  const bool restoring = monitor != nullptr;
+  if (!restoring) {
+    POINT cursor = {};
+    GetCursorPos(&cursor);
+    monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+    saved.maximized = 0;
+  }
+  MONITORINFO info = {sizeof(info)};
+  if (!GetMonitorInfoW(monitor, &info)) {
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &info.rcWork, 0);
+  }
+  const RECT& work = info.rcWork;
+  const LONG work_width = work.right - work.left;
+  const LONG work_height = work.bottom - work.top;
+  const UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
+  const LONG width = std::min(work_width, restoring
+      ? saved.bounds.right - saved.bounds.left
+      : static_cast<LONG>(MulDiv(size.width, dpi, 96)));
+  const LONG height = std::min(work_height, restoring
+      ? saved.bounds.bottom - saved.bounds.top
+      : static_cast<LONG>(MulDiv(size.height, dpi, 96)));
+  const LONG left = restoring
+      ? std::clamp(saved.bounds.left, work.left, work.right - width)
+      : work.left + (work_width - width) / 2;
+  const LONG top = restoring
+      ? std::clamp(saved.bounds.top, work.top, work.bottom - height)
+      : work.top + (work_height - height) / 2;
+  saved.bounds = {left, top, left + width, top + height};
+  return saved;
 }
 
 // Dynamically loads the |EnableNonClientDpiScaling| from the User32 module.
@@ -90,7 +155,7 @@ const wchar_t* WindowClassRegistrar::GetWindowClass() {
   if (!class_registered_) {
     WNDCLASS window_class{};
     window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    window_class.lpszClassName = kWindowClassName;
+    window_class.lpszClassName = Win32Window::kClassName;
     window_class.style = CS_HREDRAW | CS_VREDRAW;
     window_class.cbClsExtra = 0;
     window_class.cbWndExtra = 0;
@@ -103,11 +168,11 @@ const wchar_t* WindowClassRegistrar::GetWindowClass() {
     RegisterClass(&window_class);
     class_registered_ = true;
   }
-  return kWindowClassName;
+  return Win32Window::kClassName;
 }
 
 void WindowClassRegistrar::UnregisterWindowClass() {
-  UnregisterClass(kWindowClassName, nullptr);
+  UnregisterClass(Win32Window::kClassName, nullptr);
   class_registered_ = false;
 }
 
@@ -120,25 +185,20 @@ Win32Window::~Win32Window() {
   Destroy();
 }
 
-bool Win32Window::Create(const std::wstring& title,
-                         const Point& origin,
-                         const Size& size) {
+bool Win32Window::Create(const std::wstring& title, const Size& size,
+                         bool remember_placement) {
   Destroy();
+  remember_placement_ = remember_placement;
+  const auto placement = StartupPlacement(size, remember_placement);
+  show_command_ = placement.maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+  const RECT& bounds = placement.bounds;
 
   const wchar_t* window_class =
       WindowClassRegistrar::GetInstance()->GetWindowClass();
-
-  const POINT target_point = {static_cast<LONG>(origin.x),
-                              static_cast<LONG>(origin.y)};
-  HMONITOR monitor = MonitorFromPoint(target_point, MONITOR_DEFAULTTONEAREST);
-  UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
-  double scale_factor = dpi / 96.0;
-
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
-      nullptr, nullptr, GetModuleHandle(nullptr), this);
+      window_class, title.c_str(), WS_OVERLAPPEDWINDOW, bounds.left, bounds.top,
+      bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr,
+      GetModuleHandle(nullptr), this);
 
   if (!window) {
     return false;
@@ -150,7 +210,7 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
-  return ShowWindow(window_handle_, SW_SHOWNORMAL);
+  return ShowWindow(window_handle_, show_command_);
 }
 
 // static
@@ -179,6 +239,10 @@ Win32Window::MessageHandler(HWND hwnd,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
   switch (message) {
+    case WM_CLOSE:
+      if (remember_placement_) SavePlacement(hwnd);
+      break;
+
     case WM_DESTROY:
       window_handle_ = nullptr;
       Destroy();

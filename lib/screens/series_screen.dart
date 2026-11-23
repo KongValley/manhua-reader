@@ -4,18 +4,21 @@ import '../models/comic_book.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
 import '../utils/book_navigation.dart';
-import '../utils/format.dart';
 import '../widgets/book_cover.dart';
+import '../widgets/library_deletion_undo.dart';
 import '../widgets/reading_progress_bar.dart';
+import 'folder_screen.dart';
 
 class SeriesScreen extends StatelessWidget {
-  const SeriesScreen({required this.repository, super.key});
+  const SeriesScreen({required this.repository, this.onBookActions, super.key});
 
   final LibraryRepository repository;
+  final ValueChanged<ComicBook>? onBookActions;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: LibraryDeletionUndo(repository: repository),
       appBar: AppBar(
         title: const Text('系列合集'),
         backgroundColor: AppColors.background,
@@ -48,7 +51,7 @@ class SeriesScreen extends StatelessWidget {
                     builder: (context) => SeriesDetailScreen(
                       repository: repository,
                       name: group.name,
-                      books: group.books,
+                      onBookActions: onBookActions,
                     ),
                   ),
                 ),
@@ -90,9 +93,7 @@ List<_SeriesGroup> _groupBooks(List<ComicBook> books) {
     for (final entry in groups.entries)
       _SeriesGroup(
         labels[entry.key]!,
-        entry.value..sort(
-          (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-        ),
+        entry.value..sort(LibraryRepository.compareVolumes),
       ),
   ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
   return result;
@@ -245,18 +246,23 @@ class SeriesDetailScreen extends StatelessWidget {
   const SeriesDetailScreen({
     required this.repository,
     required this.name,
-    required this.books,
+    this.onBookActions,
     super.key,
   });
 
   final LibraryRepository repository;
   final String name;
-  final List<ComicBook> books;
+  final ValueChanged<ComicBook>? onBookActions;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
+    return ListenableBuilder(
+      listenable: repository,
+      builder: (context, _) {
+        final current = repository.seriesVolumes(name);
+        return Scaffold(
+          bottomNavigationBar: LibraryDeletionUndo(repository: repository),
+          appBar: AppBar(
         title: Text(name),
         backgroundColor: AppColors.background,
         surfaceTintColor: Colors.transparent,
@@ -265,7 +271,7 @@ class SeriesDetailScreen extends StatelessWidget {
             padding: const EdgeInsets.only(right: 16),
             child: Center(
               child: Text(
-                '${books.length} 卷',
+                '${current.length} 卷',
                 style: const TextStyle(
                   fontSize: 11,
                   color: AppColors.textSecondary,
@@ -275,21 +281,9 @@ class SeriesDetailScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: ListenableBuilder(
-        listenable: repository,
-        builder: (context, _) {
-          final current =
-              repository.books
-                  .where(
-                    (book) =>
-                        (book.series ?? '').toLowerCase() == name.toLowerCase(),
-                  )
-                  .toList()
-                ..sort(
-                  (a, b) =>
-                      a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-                );
-          return GridView.builder(
+      body: current.isEmpty
+          ? const Center(child: Text('系列中没有书籍'))
+          : GridView.builder(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
             physics: const BouncingScrollPhysics(),
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -301,11 +295,18 @@ class SeriesDetailScreen extends StatelessWidget {
             itemCount: current.length,
             itemBuilder: (context, index) {
               final book = current[index];
-              return _VolumeCard(
+              final actions = onBookActions;
+              final missing = !repository.fileExists(book);
+              return FolderBookCard(
                 book: book,
-                missing: !repository.fileExists(book),
+                missing: missing,
+                onMore: actions == null ? null : () => actions(book),
                 onTap: () {
-                  if (!repository.fileExists(book)) {
+                  if (missing) {
+                    if (actions != null) {
+                      actions(book);
+                      return;
+                    }
                     ScaffoldMessenger.of(context)
                       ..hideCurrentSnackBar()
                       ..showSnackBar(
@@ -317,9 +318,9 @@ class SeriesDetailScreen extends StatelessWidget {
                 },
               );
             },
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -330,88 +331,6 @@ class SeriesDetailScreen extends StatelessWidget {
     if (width >= 700) return 4;
     if (width >= 520) return 3;
     return 2;
-  }
-}
-
-class _VolumeCard extends StatelessWidget {
-  const _VolumeCard({
-    required this.book,
-    required this.missing,
-    required this.onTap,
-  });
-
-  final ComicBook book;
-  final bool missing;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  BookCover(book: book),
-                  if (missing)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(16),
-                            color: Colors.black.withValues(alpha: 0.48),
-                          ),
-                          child: const Center(
-                            child: Text(
-                              '文件丢失',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFFE57373),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 7),
-            Text(
-              book.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium
-                  ?.copyWith(fontSize: 12.5, height: 1.2),
-            ),
-            const SizedBox(height: 3),
-            Text(
-              missing
-                  ? '文件丢失'
-                  : '${formatProgressLabel(book.safeLastPage, book.pageCount)} · '
-                        '第 ${book.safeLastPage + 1} 页',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 10.5,
-                color: missing
-                    ? const Color(0xFFE57373)
-                    : book.hasStarted
-                    ? AppColors.accent.withValues(alpha: 0.9)
-                    : AppColors.textSecondary,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
 

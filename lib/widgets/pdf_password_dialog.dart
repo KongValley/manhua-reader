@@ -1,21 +1,23 @@
 import 'package:flutter/material.dart';
 
+import '../services/pdf_password_flow.dart';
+import '../services/pdf_password_store.dart';
 import '../theme/app_theme.dart';
 
 /// Shows a password dialog for an encrypted PDF.
 ///
-/// Returns the entered password, or null if the user cancels. Pass [errorText]
-/// when reopening the dialog after a failed attempt.
+/// Returns the entered password and remember choice, or null on cancellation.
+/// Pass [errorText] when reopening the dialog after a rejected password.
 /// 为加密 PDF 显示密码输入对话框。
 ///
-/// 返回用户输入的密码；取消时返回 null。密码错误后重新打开对话框时
-/// 传入 [errorText] 显示错误提示。
-Future<String?> showPdfPasswordDialog(
+/// 返回输入的密码及记住密码的选项，取消时返回 null。
+/// 密码被拒绝后重新打开对话框时，传入 [errorText] 显示错误提示。
+Future<PdfPasswordEntry?> showPdfPasswordDialog(
   BuildContext context, {
   required String fileName,
   String? errorText,
 }) {
-  return showDialog<String>(
+  return showDialog<PdfPasswordEntry>(
     context: context,
     barrierDismissible: false,
     builder: (context) =>
@@ -36,6 +38,7 @@ class _PdfPasswordDialog extends StatefulWidget {
 class _PdfPasswordDialogState extends State<_PdfPasswordDialog> {
   final TextEditingController _controller = TextEditingController();
   bool _obscure = true;
+  bool _remember = false;
 
   bool get _canSubmit => _controller.text.isNotEmpty;
 
@@ -47,12 +50,14 @@ class _PdfPasswordDialogState extends State<_PdfPasswordDialog> {
 
   void _submit() {
     if (!_canSubmit) return;
-    Navigator.of(context).pop(_controller.text);
+    Navigator.of(context)
+        .pop(PdfPasswordEntry(_controller.text, remember: _remember));
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       icon: const Icon(
         Icons.lock_outline_rounded,
         color: AppColors.accent,
@@ -100,6 +105,9 @@ class _PdfPasswordDialogState extends State<_PdfPasswordDialog> {
               controller: _controller,
               autofocus: true,
               obscureText: _obscure,
+              autocorrect: false,
+              enableSuggestions: false,
+              enableIMEPersonalizedLearning: false,
               textInputAction: TextInputAction.done,
               onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _submit(),
@@ -141,26 +149,23 @@ class _PdfPasswordDialogState extends State<_PdfPasswordDialog> {
               ),
             ),
             const SizedBox(height: 12),
-            const Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.info_outline_rounded,
-                  size: 15,
-                  color: AppColors.textSecondary,
-                ),
-                SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '密码仅保存在本次运行的内存中，不会写入磁盘；重启应用后需要重新输入。',
-                    style: TextStyle(
-                      fontSize: 11,
-                      height: 1.5,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
+            if (PdfPasswordStore.isSupported)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                dense: true,
+                title: const Text('在此设备上记住此书密码'),
+                value: _remember,
+                onChanged: (value) =>
+                    setState(() => _remember = value ?? false),
+              ),
+            const Text(
+              '密码默认仅在本次运行期间保留。',
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.5,
+                color: AppColors.textSecondary,
+              ),
             ),
           ],
         ),

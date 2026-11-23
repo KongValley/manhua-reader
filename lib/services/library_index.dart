@@ -1,3 +1,5 @@
+import 'package:lpinyin/lpinyin.dart';
+
 import '../models/comic_book.dart';
 
 /// Incremental in-memory index for fast bookshelf search, tag and series
@@ -7,7 +9,11 @@ import '../models/comic_book.dart';
 /// 启动时从 `library.json` 重建，每次变更时增量更新，避免输入时反复
 /// 对整个书架做小写转换。
 class LibraryIndex {
+  static final _initialsQuery = RegExp(r'^[a-z0-9\s.\-_]+$');
+  static final _nonAlphanumeric = RegExp(r'[^a-z0-9]');
+
   final Map<String, String> _searchText = {};
+  final Map<String, String> _searchInitials = {};
   final Map<String, String?> _seriesOf = {};
   final Map<String, Set<String>> _tagsOf = {};
   final Map<String, Set<String>> _seriesBooks = {};
@@ -15,6 +21,7 @@ class LibraryIndex {
 
   void rebuild(Iterable<ComicBook> books) {
     _searchText.clear();
+    _searchInitials.clear();
     _seriesOf.clear();
     _tagsOf.clear();
     _seriesBooks.clear();
@@ -26,7 +33,9 @@ class LibraryIndex {
 
   void upsert(ComicBook book) {
     remove(book);
-    _searchText[book.id] = _buildSearchText(book);
+    final fields = [book.title, book.originalName, ?book.series, ...book.tags];
+    _searchText[book.id] = fields.map((field) => field.toLowerCase()).join('\n');
+    _searchInitials[book.id] = fields.map(_initials).join('\n');
     final series = book.series?.trim();
     if (series != null && series.isNotEmpty) {
       _seriesOf[book.id] = series;
@@ -46,6 +55,7 @@ class LibraryIndex {
 
   void remove(ComicBook book) {
     _searchText.remove(book.id);
+    _searchInitials.remove(book.id);
     final oldSeries = _seriesOf.remove(book.id);
     if (oldSeries != null) {
       final ids = _seriesBooks[oldSeries];
@@ -64,9 +74,21 @@ class LibraryIndex {
 
   String searchTextFor(String id) => _searchText[id] ?? '';
 
-  bool matches(ComicBook book, String normalizedQuery) {
-    if (normalizedQuery.isEmpty) return true;
-    return searchTextFor(book.id).contains(normalizedQuery);
+  bool matches(ComicBook book, String query) {
+    final normalized = query.trim().toLowerCase();
+    if (normalized.isEmpty || searchTextFor(book.id).contains(normalized)) {
+      return true;
+    }
+    final initials = _queryInitials(normalized);
+    return initials != null &&
+        (_searchInitials[book.id]?.contains(initials) ?? false);
+  }
+
+  static bool matchesName(String name, String query) {
+    final normalized = query.trim().toLowerCase();
+    if (name.toLowerCase().contains(normalized)) return true;
+    final initials = _queryInitials(normalized);
+    return initials != null && _initials(name).contains(initials);
   }
 
   List<String> get seriesNames =>
@@ -85,22 +107,28 @@ class LibraryIndex {
     for (final entry in _tagBooks.entries) entry.key: entry.value.length,
   };
 
-  String _buildSearchText(ComicBook book) {
-    final buffer = StringBuffer()
-      ..write(book.title.toLowerCase())
-      ..write('\n')
-      ..write(book.originalName.toLowerCase());
-    final series = book.series?.trim();
-    if (series != null && series.isNotEmpty) {
-      buffer
-        ..write('\n')
-        ..write(series.toLowerCase());
+  static String? _queryInitials(String query) {
+    if (!_initialsQuery.hasMatch(query)) return null;
+    final initials = query.replaceAll(_nonAlphanumeric, '');
+    return initials.isEmpty ? null : initials;
+  }
+
+  static String _initials(String text) {
+    final value = text.toLowerCase();
+    if (!ChineseHelper.containsChinese(value)) return '';
+    try {
+      return PinyinHelper.getShortPinyin(value).replaceAll(_nonAlphanumeric, '');
+    } on PinyinException {
+      // Keep searchable characters around dictionary gaps.
+      // 字典缺字时仍保留可搜索的相邻字符。
+      final result = StringBuffer();
+      for (final rune in value.runes) {
+        final character = String.fromCharCode(rune);
+        final simplified = ChineseHelper.convertCharToSimplifiedChinese(character);
+        final pinyin = PinyinHelper.convertToPinyinArray(simplified, PinyinFormat.WITHOUT_TONE);
+        result.write(pinyin.isEmpty ? character : pinyin.first[0]);
+      }
+      return result.toString().replaceAll(_nonAlphanumeric, '');
     }
-    for (final tag in book.tags) {
-      buffer
-        ..write('\n')
-        ..write(tag.toLowerCase());
-    }
-    return buffer.toString();
   }
 }

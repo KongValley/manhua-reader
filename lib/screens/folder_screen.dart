@@ -7,16 +7,19 @@ import '../utils/book_navigation.dart';
 import '../utils/format.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/folder_name_dialog.dart';
+import '../widgets/library_deletion_undo.dart';
 
 class FolderScreen extends StatelessWidget {
   const FolderScreen({
     required this.repository,
     required this.folderId,
+    this.onBookActions,
     super.key,
   });
 
   final LibraryRepository repository;
   final String folderId;
+  final ValueChanged<ComicBook>? onBookActions;
 
   Future<void> _rename(BuildContext context) async {
     final folder = repository.folderById(folderId);
@@ -74,11 +77,9 @@ class FolderScreen extends StatelessWidget {
         }
         final books =
             repository.books.where((book) => book.folderId == folderId).toList()
-              ..sort(
-                (a, b) =>
-                    a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-              );
+              ..sort(LibraryRepository.compareVolumes);
         return Scaffold(
+          bottomNavigationBar: LibraryDeletionUndo(repository: repository),
           appBar: AppBar(
             title: Text(folder.name),
             backgroundColor: AppColors.background,
@@ -144,11 +145,18 @@ class FolderScreen extends StatelessWidget {
                   itemCount: books.length,
                   itemBuilder: (context, index) {
                     final book = books[index];
-                    return _FolderBookCard(
+                    final actions = onBookActions;
+                    final missing = !repository.fileExists(book);
+                    return FolderBookCard(
                       book: book,
-                      missing: !repository.fileExists(book),
+                      missing: missing,
+                      onMore: actions == null ? null : () => actions(book),
                       onTap: () {
-                        if (!repository.fileExists(book)) {
+                        if (missing) {
+                          if (actions != null) {
+                            actions(book);
+                            return;
+                          }
                           ScaffoldMessenger.of(context)
                             ..hideCurrentSnackBar()
                             ..showSnackBar(
@@ -180,16 +188,19 @@ class FolderScreen extends StatelessWidget {
   }
 }
 
-class _FolderBookCard extends StatelessWidget {
-  const _FolderBookCard({
+class FolderBookCard extends StatelessWidget {
+  const FolderBookCard({
     required this.book,
     required this.missing,
     required this.onTap,
+    this.onMore,
+    super.key,
   });
 
   final ComicBook book;
   final bool missing;
   final VoidCallback onTap;
+  final VoidCallback? onMore;
 
   @override
   Widget build(BuildContext context) {
@@ -197,6 +208,7 @@ class _FolderBookCard extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onMore,
         borderRadius: BorderRadius.circular(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -224,6 +236,20 @@ class _FolderBookCard extends StatelessWidget {
                               ),
                             ),
                           ),
+                        ),
+                      ),
+                    ),
+                  if (onMore != null)
+                    Positioned(
+                      right: 4,
+                      bottom: 4,
+                      child: IconButton.filled(
+                        onPressed: onMore,
+                        tooltip: '管理《${book.title}》',
+                        icon: const Icon(Icons.more_horiz_rounded, size: 20),
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.black.withValues(alpha: 0.72),
+                          foregroundColor: Colors.white,
                         ),
                       ),
                     ),

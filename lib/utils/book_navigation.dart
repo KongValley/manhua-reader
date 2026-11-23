@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/comic_book.dart';
 import '../screens/album_screen.dart';
 import '../screens/reader_screen.dart';
+import '../services/external_open_channel.dart';
 import '../services/library_repository.dart';
 
 /// Opens an album's thumbnail wall or a regular comic reader.
@@ -18,16 +19,23 @@ Future<void> openComicBook(
   required LibraryRepository repository,
   int? page,
 }) {
-  final Widget screen;
-  if (book.format == ComicFormat.album && page == null) {
-    screen = AlbumScreen(book: book, repository: repository);
-  } else {
-    screen = ReaderScreen(
-      book: book,
-      repository: repository,
-      initialPage: page,
-    );
-  }
-  return Navigator.of(context)
-      .push(MaterialPageRoute<void>(builder: (context) => screen));
+  final route = book.format == ComicFormat.album && page == null
+      ? MaterialPageRoute<void>(
+          builder: (context) => AlbumScreen(book: book, repository: repository),
+        )
+      : _readerRoute(book: book, repository: repository, page: page);
+  return Navigator.of(context).push(route);
 }
+
+MaterialPageRoute<void> _readerRoute({
+  required ComicBook book,
+  required LibraryRepository repository,
+  int? page,
+}) => MaterialPageRoute<void>(
+  settings: const RouteSettings(name: readerRouteName),
+  builder: (context) => ReaderScreen(
+    book: book,
+    repository: repository,
+    initialPage: page,
+  ),
+);

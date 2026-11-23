@@ -1,17 +1,27 @@
+/// Largest supported [buildSpreads] offset: two leading single pages cover
+/// both pairing parities as well as "cover + blank page" scans.
+/// 双页配对支持的最大偏移：前两页单独显示即可覆盖两种配对奇偶，
+/// 以及「封面 + 空白页」的扫描件。
+const int maxSpreadOffset = 2;
+
 /// Spread pairing used by the double-page reader.
 ///
-/// The first page is shown alone (typically the cover), then pages are paired
-/// as (1, 2), (3, 4), ... — the convention used by most book readers.
+/// The first [offset] pages are shown alone (typically the cover), then the
+/// remaining pages are paired two by one — the convention used by most book
+/// readers. The default offset of 1 pairs pages as (1, 2), (3, 4), ...
 /// 双页阅读器使用的跨页配对规则。
 ///
-/// 第一页单独显示（通常是封面），之后按 (1, 2)、(3, 4)…… 两页一组，
-/// 与大多数书籍阅读器的习惯一致。
-List<List<int>> buildSpreads(int pageCount) {
+/// 前 [offset] 页单独显示（通常是封面），其余页面两两一组，与大多数
+/// 书籍阅读器的习惯一致。默认偏移 1 时按 (1, 2)、(3, 4)…… 配对。
+List<List<int>> buildSpreads(int pageCount, {int offset = 1}) {
   if (pageCount <= 0) return const [];
-  final spreads = <List<int>>[
-    const [0],
-  ];
-  var page = 1;
+  final leading = offset.clamp(0, maxSpreadOffset);
+  final spreads = <List<int>>[];
+  var page = 0;
+  while (page < pageCount && page < leading) {
+    spreads.add([page]);
+    page += 1;
+  }
   while (page < pageCount) {
     if (page + 1 < pageCount) {
       spreads.add([page, page + 1]);

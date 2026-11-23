@@ -4,14 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../models/toc_entry.dart';
+import '../widgets/comic_page_image.dart';
 import 'comic_source.dart';
+import 'page_raster.dart';
 
 /// PDF pages rendered by pdfrx/PDFium.
 /// 由 pdfrx/PDFium 渲染的 PDF 页面。
-class PdfComicSource implements ComicSource {
+class PdfComicSource implements ComicSource, ComicPageRenderer {
   PdfComicSource(this._document);
 
   final PdfDocument _document;
+  final _renders = <PdfPageRenderCancellationToken>{};
+  bool _disposed = false;
 
   PdfDocument get document => _document;
 
@@ -27,36 +31,29 @@ class PdfComicSource implements ComicSource {
     BuildContext context,
     int index, {
     ValueChanged<ui.Image>? onImage,
-  }) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Center(
-          child: Container(
-            width: 24,
-            height: 24,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white24, width: 2),
-            ),
-          ),
-        ),
-        PdfPageView(
-          document: _document,
-          pageNumber: index + 1,
-          maximumDpi: 300,
-          backgroundColor: Colors.transparent,
-          decoration: const BoxDecoration(color: Colors.transparent),
-          decorationBuilder: onImage == null
-              ? null
-              : (context, pageSize, page, rawImage) {
-                  final image = rawImage?.image;
-                  if (image != null) onImage(image);
-                  return Center(child: rawImage);
-                },
-        ),
-      ],
-    );
+  }) => ComicPageImage(source: this, index: index, onImage: onImage);
+
+  @override
+  Future<ui.Image> renderPageImage(int index, Size targetSize) async {
+    if (_disposed) throw StateError('PDF source is closed');
+    final page = _document.pages[index];
+    final size = fitPageRasterSize(page.size, targetSize);
+    final token = page.createCancellationToken();
+    _renders.add(token);
+    try {
+      final image = await page.renderForDisplay(
+        fullWidth: size.width,
+        fullHeight: size.height,
+        cancellationToken: token,
+      );
+      if (_disposed || image == null) {
+        image?.dispose();
+        throw StateError('PDF page could not be rendered');
+      }
+      return image;
+    } finally {
+      _renders.remove(token);
+    }
   }
 
   @override
@@ -110,5 +107,12 @@ class PdfComicSource implements ComicSource {
   }
 
   @override
-  Future<void> dispose() => _document.dispose();
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    for (final token in _renders) {
+      token.cancel();
+    }
+    await _document.dispose();
+  }
 }

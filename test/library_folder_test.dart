@@ -164,7 +164,7 @@ void main() {
     restored.dispose();
   });
 
-  test('migrates v3 data without folders to schema v4', () async {
+  test('migrates v3 data without folders to schema v5', () async {
     final file = File(p.join(paths.booksDir.path, 'legacy.pdf'));
     await file.writeAsBytes([1]);
     await seed(
@@ -182,7 +182,7 @@ void main() {
     final decoded = jsonDecode(
       await paths.libraryFile.readAsString(),
     ) as Map<String, dynamic>;
-    expect(decoded['version'], 4);
+    expect(decoded['version'], 5);
     expect(decoded['folders'], isEmpty);
   });
 }

@@ -20,6 +20,15 @@ class ReadingStatsSheet extends StatelessWidget {
     return buffer.toString();
   }
 
+  String _duration(int seconds) {
+    if (seconds < 60) return '${_number(seconds)} 秒';
+    final hours = seconds ~/ 3600;
+    final minutes = (seconds ~/ 60) % 60;
+    if (hours == 0) return '$minutes 分钟';
+    final hourLabel = '${_number(hours)} 小时';
+    return minutes == 0 ? hourLabel : '$hourLabel $minutes 分钟';
+  }
+
   @override
   Widget build(BuildContext context) {
     final stats = repository.stats;
@@ -116,6 +125,7 @@ class ReadingStatsSheet extends StatelessWidget {
                       label: '今日阅读',
                       value: _number(today),
                       unit: '页',
+                      duration: _duration(stats.secondsToday(now)),
                       icon: Icons.today_rounded,
                       accent: AppColors.accent,
                     ),
@@ -126,6 +136,7 @@ class ReadingStatsSheet extends StatelessWidget {
                       label: '本周阅读',
                       value: _number(week),
                       unit: '页',
+                      duration: _duration(stats.secondsThisWeek(now)),
                       icon: Icons.date_range_rounded,
                       accent: const Color(0xFF6B7BFF),
                     ),
@@ -150,6 +161,7 @@ class ReadingStatsSheet extends StatelessWidget {
                       label: '累计阅读',
                       value: _number(stats.totalPages),
                       unit: '页',
+                      duration: _duration(stats.totalSeconds),
                       icon: Icons.auto_stories_rounded,
                       accent: const Color(0xFF7BC98B),
                     ),
@@ -254,6 +266,7 @@ class _StatCard extends StatelessWidget {
     required this.unit,
     required this.icon,
     required this.accent,
+    this.duration,
   });
 
   final String label;
@@ -261,6 +274,7 @@ class _StatCard extends StatelessWidget {
   final String unit;
   final IconData icon;
   final Color accent;
+  final String? duration;
 
   @override
   Widget build(BuildContext context) {
@@ -318,6 +332,16 @@ class _StatCard extends StatelessWidget {
               ),
             ],
           ),
+          if (duration case final readingTime?) ...[
+            const SizedBox(height: 4),
+            Text(
+              '时长 $readingTime',
+              style: const TextStyle(
+                fontSize: 11,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ],
         ],
       ),
     );

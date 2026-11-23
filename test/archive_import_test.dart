@@ -57,6 +57,44 @@ void main() {
     expect(reloaded.books.first.pageCount, 3);
   });
 
+  test('external opens reuse only byte-identical library files', () async {
+    final repository = LibraryRepository(paths);
+    await repository.load();
+    addTearDown(repository.dispose);
+
+    final page = _png(90, 120);
+    final original = _zip({'001.png': page});
+    final different = _zip({'002.png': page});
+    expect(different, hasLength(original.length));
+
+    final source = File(p.join(temp.path, 'book.cbz'));
+    await source.writeAsBytes(original);
+    final first = await repository.importFile(source.path);
+    final renamed = File(p.join(temp.path, 'renamed.cbz'));
+    await renamed.writeAsBytes(original);
+    expect(
+      await repository.importFile(renamed.path, reuseIdenticalBook: true),
+      same(first),
+    );
+
+    await source.writeAsBytes(different);
+    final second = await repository.importFile(
+      source.path,
+      reuseIdenticalBook: true,
+    );
+    expect(second.id, isNot(first.id));
+    expect(repository.books, hasLength(2));
+
+    await File(first.filePath).delete();
+    final replacement = await repository.importFile(
+      renamed.path,
+      reuseIdenticalBook: true,
+    );
+    expect(replacement.id, isNot(first.id));
+    expect(repository.fileExists(replacement), isTrue);
+    await repository.flush();
+  });
+
   test('accepts CBZ but not plain ZIP extensions', () {
     expect(ComicFormat.allExtensions, ['pdf', 'mobi', 'cbz']);
     expect(ComicFormat.fromExtension('.cbz'), ComicFormat.cbz);

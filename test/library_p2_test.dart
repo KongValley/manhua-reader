@@ -82,7 +82,7 @@ void main() {
     final decoded = jsonDecode(
       await paths.libraryFile.readAsString(),
     ) as Map<String, dynamic>;
-    expect(decoded['version'], 4);
+    expect(decoded['version'], 5);
     expect(decoded['stats'], isA<Map>());
     final stored = (decoded['books'] as List).single as Map;
     expect(stored['series'], 'VOL');

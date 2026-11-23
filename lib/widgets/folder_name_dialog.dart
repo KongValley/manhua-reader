@@ -3,17 +3,20 @@ import 'package:flutter/material.dart';
 Future<String?> showFolderNameDialog(
   BuildContext context, {
   required String initialName,
+  String title = '重命名文件夹',
 }) {
   return showDialog<String>(
     context: context,
-    builder: (context) => _FolderNameDialog(initialName: initialName),
+    builder: (context) =>
+        _FolderNameDialog(initialName: initialName, title: title),
   );
 }
 
 class _FolderNameDialog extends StatefulWidget {
-  const _FolderNameDialog({required this.initialName});
+  const _FolderNameDialog({required this.initialName, required this.title});
 
   final String initialName;
+  final String title;
 
   @override
   State<_FolderNameDialog> createState() => _FolderNameDialogState();
@@ -47,11 +50,11 @@ class _FolderNameDialogState extends State<_FolderNameDialog> {
   Widget build(BuildContext context) {
     final canSave = _controller.text.trim().isNotEmpty;
     return AlertDialog(
-      title: const Row(
+      title: Row(
         children: [
-          Icon(Icons.folder_outlined, size: 21),
-          SizedBox(width: 10),
-          Text('重命名文件夹'),
+          const Icon(Icons.folder_outlined, size: 21),
+          const SizedBox(width: 10),
+          Text(widget.title),
         ],
       ),
       content: ConstrainedBox(

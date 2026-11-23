@@ -1,12 +1,7 @@
-/// Session-only storage for successfully used PDF passwords.
-///
-/// Passwords are intentionally kept in memory only: they are never written to
-/// the library JSON or any other file. Restarting the app requires the user to
-/// enter them again.
-/// 仅在本次会话内保存成功使用的 PDF 密码。
-///
-/// 密码只保存在内存中：绝不会写入 library.json 或任何其他文件。
-/// 重启应用后需要用户重新输入。
+/// In-memory cache for PDF passwords that unlocked a document this session.
+/// The cache is cleared on restart. Opt-in storage is managed separately.
+/// 在内存中缓存本次运行期间成功解锁 PDF 的密码。
+/// 重启会清空缓存，用户主动选择保存的密码由安全存储单独管理。
 class PdfPasswordCache {
   PdfPasswordCache._();
 

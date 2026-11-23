@@ -3,6 +3,13 @@ import 'package:flutter/material.dart';
 import '../models/reader_settings.dart';
 import '../theme/app_theme.dart';
 
+typedef ReaderLayoutPreferences = ({
+  ReadingMode mode,
+  bool rightToLeft,
+  bool doublePage,
+  int spreadOffset,
+});
+
 /// Bottom sheet with reading comfort and navigation settings.
 /// 包含阅读舒适度与翻页方式的底部设置面板。
 class ReaderSettingsSheet extends StatefulWidget {
@@ -16,6 +23,10 @@ class ReaderSettingsSheet extends StatefulWidget {
     required this.autoTurnSeconds,
     required this.volumeKeys,
     required this.pageTurnAnimation,
+    required this.spreadOffset,
+    required this.tapZoneWidth,
+    required this.autoCrop,
+    required this.hasBookPrefs,
     required this.isAndroid,
     required this.onModeChanged,
     required this.onRightToLeftChanged,
@@ -26,6 +37,10 @@ class ReaderSettingsSheet extends StatefulWidget {
     required this.onAutoTurnChanged,
     required this.onVolumeKeysChanged,
     required this.onPageTurnAnimationChanged,
+    required this.onSpreadOffsetChanged,
+    required this.onTapZoneWidthChanged,
+    required this.onAutoCropChanged,
+    required this.onResetBookPrefs,
     super.key,
   });
 
@@ -38,6 +53,13 @@ class ReaderSettingsSheet extends StatefulWidget {
   final int autoTurnSeconds;
   final bool volumeKeys;
   final PageTurnAnimation pageTurnAnimation;
+  final int spreadOffset;
+  final TapZoneWidth tapZoneWidth;
+  final bool autoCrop;
+
+  /// Whether the current book keeps reading preferences of its own.
+  /// 当前书是否保存了单独的阅读偏好。
+  final bool hasBookPrefs;
   final bool isAndroid;
 
   final ValueChanged<ReadingMode> onModeChanged;
@@ -49,12 +71,17 @@ class ReaderSettingsSheet extends StatefulWidget {
   final ValueChanged<int> onAutoTurnChanged;
   final ValueChanged<bool> onVolumeKeysChanged;
   final ValueChanged<PageTurnAnimation> onPageTurnAnimationChanged;
+  final ValueChanged<int> onSpreadOffsetChanged;
+  final ValueChanged<TapZoneWidth> onTapZoneWidthChanged;
+  final ValueChanged<bool> onAutoCropChanged;
+  final ReaderLayoutPreferences Function() onResetBookPrefs;
 
   @override
   State<ReaderSettingsSheet> createState() => _ReaderSettingsSheetState();
 }
 
 class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
+  late bool _hasBookPrefs = widget.hasBookPrefs;
   late ReadingMode _mode = widget.mode;
   late bool _rightToLeft = widget.rightToLeft;
   late bool _doublePage = widget.doublePage;
@@ -64,20 +91,63 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
   late int _autoTurnSeconds = widget.autoTurnSeconds;
   late bool _volumeKeys = widget.volumeKeys;
   late PageTurnAnimation _animation = widget.pageTurnAnimation;
+  late int _spreadOffset = widget.spreadOffset;
+  late TapZoneWidth _tapZoneWidth = widget.tapZoneWidth;
+  late bool _autoCrop = widget.autoCrop;
 
   void _setMode(ReadingMode value) {
     if (value == _mode) return;
-    setState(() => _mode = value);
+    setState(() {
+      _mode = value;
+      _hasBookPrefs = true;
+    });
     widget.onModeChanged(value);
   }
 
+  void _setSpreadOffset(int value) {
+    if (value == _spreadOffset) return;
+    setState(() {
+      _spreadOffset = value;
+      _hasBookPrefs = true;
+    });
+    widget.onSpreadOffsetChanged(value);
+  }
+
+  void _setTapZoneWidth(TapZoneWidth value) {
+    if (value == _tapZoneWidth) return;
+    setState(() => _tapZoneWidth = value);
+    widget.onTapZoneWidthChanged(value);
+  }
+
+  void _resetBookPrefs() {
+    final prefs = widget.onResetBookPrefs();
+    setState(() {
+      _mode = prefs.mode;
+      _rightToLeft = prefs.rightToLeft;
+      _doublePage = prefs.doublePage;
+      _spreadOffset = prefs.spreadOffset;
+      _hasBookPrefs = false;
+    });
+  }
+
+  void _setAutoCrop(bool value) {
+    setState(() => _autoCrop = value);
+    widget.onAutoCropChanged(value);
+  }
+
   void _setRightToLeft(bool value) {
-    setState(() => _rightToLeft = value);
+    setState(() {
+      _rightToLeft = value;
+      _hasBookPrefs = true;
+    });
     widget.onRightToLeftChanged(value);
   }
 
   void _setDoublePage(bool value) {
-    setState(() => _doublePage = value);
+    setState(() {
+      _doublePage = value;
+      _hasBookPrefs = true;
+    });
     widget.onDoublePageChanged(value);
   }
 
@@ -183,14 +253,76 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                         selected: {_mode},
                         onSelectionChanged: (value) => _setMode(value.first),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4, bottom: 2),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _hasBookPrefs ? '本书使用单独的阅读设置' : '阅读方式会按书记住',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.textSecondary,
+                                ),
+                              ),
+                            ),
+                            if (_hasBookPrefs)
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                  ),
+                                  minimumSize: const Size(0, 32),
+                                  visualDensity: VisualDensity.compact,
+                                  textStyle: const TextStyle(fontSize: 12),
+                                ),
+                                onPressed: _resetBookPrefs,
+                                child: const Text('改回跟随全局'),
+                              ),
+                          ],
+                        ),
+                      ),
                       if (_mode == ReadingMode.horizontal) ...[
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('双页模式'),
-                          subtitle: const Text('封面单独显示，之后两页一跨'),
+                          subtitle: Text(
+                            _spreadOffset == 0
+                                ? '从首页开始两页一跨'
+                                : _spreadOffset >= 2
+                                ? '前两页单独显示，之后两页一跨'
+                                : '封面单独显示，之后两页一跨',
+                          ),
                           value: _doublePage,
                           onChanged: _setDoublePage,
                         ),
+                        if (_doublePage)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 0, 0, 6),
+                            child: SegmentedButton<int>(
+                              showSelectedIcon: false,
+                              style: ButtonStyle(
+                                visualDensity: VisualDensity.compact,
+                                textStyle: WidgetStatePropertyAll(
+                                  const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                padding: WidgetStatePropertyAll(
+                                  const EdgeInsets.symmetric(horizontal: 6),
+                                ),
+                              ),
+                              segments: const [
+                                ButtonSegment(value: 0, label: Text('首页起成对')),
+                                ButtonSegment(value: 1, label: Text('封面单页')),
+                                ButtonSegment(value: 2, label: Text('前两页单独')),
+                              ],
+                              selected: {_spreadOffset},
+                              onSelectionChanged: (value) =>
+                                  _setSpreadOffset(value.first),
+                            ),
+                          ),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('从右向左'),
@@ -199,6 +331,44 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                           onChanged: _setRightToLeft,
                         ),
                       ],
+                      const SizedBox(height: 4),
+                      const _SectionTitle('点击翻页'),
+                      SegmentedButton<TapZoneWidth>(
+                        showSelectedIcon: false,
+                        segments: const [
+                          ButtonSegment(
+                            value: TapZoneWidth.narrow,
+                            icon: Icon(
+                              Icons.horizontal_distribute_rounded,
+                              size: 16,
+                            ),
+                            label: Text('窄'),
+                          ),
+                          ButtonSegment(
+                            value: TapZoneWidth.medium,
+                            icon: Icon(Icons.compare_arrows_rounded, size: 16),
+                            label: Text('适中'),
+                          ),
+                          ButtonSegment(
+                            value: TapZoneWidth.wide,
+                            icon: Icon(Icons.swap_horiz_rounded, size: 16),
+                            label: Text('宽'),
+                          ),
+                        ],
+                        selected: {_tapZoneWidth},
+                        onSelectionChanged: (value) =>
+                            _setTapZoneWidth(value.first),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2, bottom: 8),
+                        child: Text(
+                          '屏幕左右两侧点击翻页区域的宽度，中间点按显示菜单。',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                      ),
                       const SizedBox(height: 12),
                       const _SectionTitle('翻页动画'),
                       SegmentedButton<PageTurnAnimation>(
@@ -227,6 +397,13 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                         subtitle: const Text('阅读时不自动熄屏'),
                         value: _keepAwake,
                         onChanged: _setKeepAwake,
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('自动裁边'),
+                        subtitle: const Text('裁掉扫描页四周的空白边距'),
+                        value: _autoCrop,
+                        onChanged: _setAutoCrop,
                       ),
                       _SettingSlider(
                         title: '画面亮度',

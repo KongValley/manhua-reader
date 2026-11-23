@@ -19,11 +19,14 @@ import '../models/library_settings.dart';
 import '../models/library_storage_report.dart';
 import '../models/reader_settings.dart';
 import '../models/reading_stats.dart';
+import '../utils/natural_sort.dart';
+import '../utils/pagination.dart';
 import '../utils/series.dart';
 import 'app_paths.dart';
 import 'cover_generator.dart';
 import 'library_index.dart';
 import 'pdf_password_cache.dart';
+import 'pdf_password_store.dart';
 import 'saf_album_service.dart';
 
 class ImportException implements Exception {
@@ -52,10 +55,21 @@ class LibraryRepository extends ChangeNotifier {
 
   final LibraryIndex _index = LibraryIndex();
 
+  /// Books removed from the shelf whose files still wait for the undo window.
+  /// 已从书架移除、但文件仍在等待撤销窗口结束的书籍。
+  final List<ComicBook> _pendingDeletion = [];
+  final List<ComicBook> _finalizingDeletion = [];
+  DateTime? _deleteDeadline;
+  Timer? _deleteTimer;
+  Future<void> _storageOperation = Future.value();
+  bool _disposed = false;
+
+  /// How long deleted books can be restored before their files are removed.
+  /// 删除后可撤销、尚未真正删除文件的时间。
+  static const Duration deleteUndoWindow = Duration(seconds: 6);
+
   Timer? _saveTimer;
   bool _saved = false;
-  bool _saving = false;
-  bool _dirty = false;
 
   bool get isLoaded => _saved;
   bool get isEmpty => _books.isEmpty;
@@ -70,8 +84,8 @@ class LibraryRepository extends ChangeNotifier {
 
   bool matchesSearch(ComicBook book, String query) {
     if (_index.matches(book, query)) return true;
-    final folderName = folderById(book.folderId)?.name.toLowerCase();
-    return folderName != null && folderName.contains(query);
+    final folderName = folderById(book.folderId)?.name;
+    return folderName != null && LibraryIndex.matchesName(folderName, query);
   }
 
   List<LibraryFolder> get folders => List<LibraryFolder>.unmodifiable(_folders);
@@ -92,6 +106,44 @@ class LibraryRepository extends ChangeNotifier {
       if (counts.containsKey(id)) counts[id] = counts[id]! + 1;
     }
     return counts;
+  }
+
+  /// Book and cover references that storage cleanup must leave alone.
+  /// 存储清理必须保留的书籍和封面引用。
+  Iterable<ComicBook> get _retainedBooks sync* {
+    yield* _books;
+    yield* _pendingDeletion;
+    yield* _finalizingDeletion;
+  }
+
+  /// Number of deleted books that can still be restored.
+  /// 仍可恢复的已删除书籍数量。
+  int get pendingDeletionCount => _pendingDeletion.length;
+
+  /// The volume after [book] inside its series, in the order the series page
+  /// uses. Returns null for books without a series or for the last volume.
+  /// [book] 所在系列中的下一卷，顺序与系列页一致；
+  /// 没有系列或已是最后一卷时返回 null。
+  ComicBook? nextVolumeInSeries(ComicBook book) {
+    final series = book.series;
+    if (series == null || series.trim().isEmpty) return null;
+    final volumes = seriesVolumes(series);
+    final index = volumes.indexWhere((volume) => volume.id == book.id);
+    if (index < 0 || index + 1 >= volumes.length) return null;
+    return volumes[index + 1];
+  }
+
+  List<ComicBook> seriesVolumes(String series) {
+    final key = series.trim().toLowerCase();
+    return _books
+        .where((book) => book.series?.trim().toLowerCase() == key)
+        .toList()
+      ..sort(compareVolumes);
+  }
+
+  static int compareVolumes(ComicBook a, ComicBook b) {
+    final title = naturalCompare(a.title, b.title);
+    return title == 0 ? a.id.compareTo(b.id) : title;
   }
 
   ComicBook? get lastRead {
@@ -122,23 +174,26 @@ class LibraryRepository extends ChangeNotifier {
         final decoded = jsonDecode(await file.readAsString());
         if (decoded is Map<String, dynamic>) {
           loadedVersion = (decoded['version'] as num?)?.toInt() ?? 1;
-          final booksJson = decoded['books'];
-          if (booksJson is List) {
-            _books
-              ..clear()
-              ..addAll(
-                booksJson
-                    .whereType<Map>()
-                    .map(
-                      (json) => ComicBook.fromJson(
-                        json.map((key, value) => MapEntry('$key', value)),
-                      ),
-                    )
-                    .where(
-                      (book) => book.id.isNotEmpty && book.filePath.isNotEmpty,
-                    ),
-              );
-          }
+          _books
+            ..clear()
+            ..addAll(_decodeBooks(decoded['books']));
+          final loadedIds = _books.map((book) => book.id).toSet();
+          _pendingDeletion
+            ..clear()
+            ..addAll(
+              _decodeBooks(decoded['pendingDeletion'])
+                  .where((book) => loadedIds.add(book.id)),
+            );
+          _finalizingDeletion
+            ..clear()
+            ..addAll(
+              _decodeBooks(decoded['finalizingDeletion'])
+                  .where((book) => loadedIds.add(book.id)),
+            );
+          final deadline = decoded['deleteDeadline'];
+          _deleteDeadline = deadline is String
+              ? DateTime.tryParse(deadline)
+              : null;
           final foldersJson = decoded['folders'];
           _folders.clear();
           if (foldersJson is List) {
@@ -193,7 +248,7 @@ class LibraryRepository extends ChangeNotifier {
       }
     }
 
-    for (final book in _books) {
+    for (final book in _retainedBooks) {
       // iOS can move the app container between launches. Fall back to the
       // current app directories when an absolute path is stale.
       // iOS 可能在两次启动之间移动应用容器；绝对路径失效时回退到当前
@@ -213,23 +268,54 @@ class LibraryRepository extends ChangeNotifier {
       }
     }
     final folderIds = {for (final folder in _folders) folder.id};
-    for (final book in _books) {
+    for (final book in _retainedBooks) {
       if (book.folderId != null && !folderIds.contains(book.folderId)) {
         book.folderId = null;
       }
     }
     _index.rebuild(_books);
     _sortBooks();
+    final deadline = _deleteDeadline;
+    if (_pendingDeletion.isNotEmpty && deadline == null) {
+      // Preserve the undo option when loading metadata without a valid deadline.
+      // 读取不到有效截止时间时仍保留撤销机会。
+      _deleteDeadline = DateTime.now().add(deleteUndoWindow);
+    }
+    if (deadline != null && !deadline.isAfter(DateTime.now())) {
+      await commitPendingDeletion();
+    } else {
+      _armDeletionTimer();
+      if (_finalizingDeletion.isNotEmpty) await _finishDeletion();
+    }
     _saved = true;
     notifyListeners();
   }
 
+  Iterable<ComicBook> _decodeBooks(Object? data) {
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((json) => ComicBook.fromJson(Map<String, dynamic>.from(json)))
+        .where((book) => book.id.isNotEmpty && book.filePath.isNotEmpty);
+  }
+
+  /// Checks for a duplicate whose removal has not finished.
+  /// 检查是否有尚未完成删除的重复书籍。
+  bool hasPendingDeletionFor(String originalName, int fileSize) =>
+      [..._pendingDeletion, ..._finalizingDeletion].any(
+        (book) =>
+            book.originalName == originalName && book.fileSize == fileSize,
+      );
+
+  /// Imports a local file. OS open requests can reuse a byte-identical book.
+  /// 导入本地文件。通过系统打开时，可以复用内容完全一致的书籍。
   Future<ComicBook> importFile(
     String sourcePath, {
     String? originalName,
     String? folderId,
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
+    bool reuseIdenticalBook = false,
   }) async {
     final source = File(sourcePath);
     if (!await source.exists()) {
@@ -243,7 +329,16 @@ class LibraryRepository extends ChangeNotifier {
     }
 
     final fileSize = await source.length();
-    _checkDuplicate(name, fileSize);
+    if (reuseIdenticalBook) {
+      onProgress?.call('正在检查 $name', 0);
+      final existing = await _findIdenticalBook(source, format, fileSize);
+      if (existing != null) return existing;
+      if (hasPendingDeletionFor(name, fileSize)) {
+        throw ImportException('同名同大小的书籍正在删除，请撤销删除或稍后重试');
+      }
+    } else {
+      _checkDuplicate(name, fileSize);
+    }
 
     final id = _newId();
     final destination = File(
@@ -372,12 +467,14 @@ class LibraryRepository extends ChangeNotifier {
     String? folderId,
     ImportProgressCallback? onProgress,
   }) {
-    return _importAlbum(
-      store: SafAlbumStore(treeUri),
-      source: treeUri,
-      name: name,
-      folderId: folderId,
-      onProgress: onProgress,
+    return _withStorageOperation(
+      () => _importAlbum(
+        store: SafAlbumStore(treeUri),
+        source: treeUri,
+        name: name,
+        folderId: folderId,
+        onProgress: onProgress,
+      ),
     );
   }
 
@@ -429,7 +526,7 @@ class LibraryRepository extends ChangeNotifier {
       _index.upsert(book);
       _sortBooks();
       notifyListeners();
-      await _saveNow();
+      await _saveNow(durable: true);
       onProgress?.call('导入完成', 1);
       return book;
     } on ImportException {
@@ -483,7 +580,7 @@ class LibraryRepository extends ChangeNotifier {
 
       _books.insert(0, book);
       _index.upsert(book);
-      await _saveNow();
+      await _saveNow(durable: true);
       notifyListeners();
       onProgress?.call('导入完成', 1);
       return book;
@@ -638,9 +735,9 @@ class LibraryRepository extends ChangeNotifier {
       book.bookmarks.removeWhere(
         (bookmark) => bookmark.page < 0 || bookmark.page >= book.pageCount,
       );
-      await _saveNow();
+      await _saveNow(durable: true);
+      await PdfPasswordStore.forget(book, filePath: oldFile.path);
       notifyListeners();
-      PdfPasswordCache.remove(oldFile.path);
       await _deleteQuietly(oldFile);
       if (oldCover != null && oldCover != newCoverPath) {
         await _deleteQuietly(File(oldCover));
@@ -660,15 +757,19 @@ class LibraryRepository extends ChangeNotifier {
     }
   }
 
-  /// Rebuilds a cover in a new file so Flutter's image cache sees the change.
-  /// 在新文件中重建封面，使 Flutter 图片缓存能够感知变化。
   /// Replaces the source folder of a referenced album while keeping metadata.
   /// 更换引用型相册的源文件夹，同时保留标题、进度与书签。
   Future<ComicBook> relinkAlbum(
     ComicBook book, {
     required String source,
     ImportProgressCallback? onProgress,
-  }) async {
+  }) => _withStorageOperation(() => _relinkAlbum(book, source, onProgress));
+
+  Future<ComicBook> _relinkAlbum(
+    ComicBook book,
+    String source,
+    ImportProgressCallback? onProgress,
+  ) async {
     final store = createAlbumStore(source);
     final oldPath = book.filePath;
     final oldCover = book.coverPath;
@@ -703,7 +804,7 @@ class LibraryRepository extends ChangeNotifier {
         book.coverPath = newCoverPath;
         book.customCover = false;
       }
-      await _saveNow();
+      await _saveNow(durable: true);
       notifyListeners();
       if (oldCover != null &&
           newCoverPath != null &&
@@ -771,7 +872,7 @@ class LibraryRepository extends ChangeNotifier {
           (bookmark) => bookmark.page < 0 || bookmark.page >= book.pageCount,
         );
       }
-      await _saveNow();
+      await _saveNow(durable: true);
       notifyListeners();
       if (oldCover != null && oldCover != newCoverPath) {
         await _deleteQuietly(File(oldCover));
@@ -799,7 +900,7 @@ class LibraryRepository extends ChangeNotifier {
     final oldCover = book.coverPath;
     book.coverPath = newPath;
     book.customCover = true;
-    await _saveNow();
+    await _saveNow(durable: true);
     notifyListeners();
     if (oldCover != null && oldCover != newPath) {
       await _deleteQuietly(File(oldCover));
@@ -808,9 +909,10 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   Future<LibraryStorageReport> storageReport() async {
-    final bookPaths = {for (final book in _books) _pathKey(book.filePath)};
+    final retained = _retainedBooks.toList();
+    final bookPaths = {for (final book in retained) _pathKey(book.filePath)};
     final coverPaths = {
-      for (final book in _books)
+      for (final book in retained)
         if (book.coverPath != null) _pathKey(book.coverPath!),
     };
 
@@ -851,10 +953,13 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Deletes unreferenced files and the app cache. Returns bytes reclaimed.
   /// 删除未被引用的文件与应用缓存，返回回收的字节数。
-  Future<int> cleanupStorage() async {
-    final bookPaths = {for (final book in _books) _pathKey(book.filePath)};
+  Future<int> cleanupStorage() => _withStorageOperation(_cleanupStorage);
+
+  Future<int> _cleanupStorage() async {
+    final retained = _retainedBooks.toList();
+    final bookPaths = {for (final book in retained) _pathKey(book.filePath)};
     final coverPaths = {
-      for (final book in _books)
+      for (final book in retained)
         if (book.coverPath != null) _pathKey(book.coverPath!),
     };
 
@@ -883,7 +988,7 @@ class LibraryRepository extends ChangeNotifier {
   /// 以 JSON 导出书架元数据、书签、组织信息与统计。
   /// 文件路径为相对路径；仅 JSON 不包含漫画文件字节。
   Uint8List exportBackupJson() {
-    final manifest = _buildBackupManifest(includeFiles: false);
+    final manifest = _buildBackupManifest(_books, includeFiles: false);
     return Uint8List.fromList(
       utf8.encode(const JsonEncoder.withIndent('  ').convert(manifest)),
     );
@@ -891,7 +996,12 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Builds a ZIP backup containing `manifest.json`, books and covers.
   /// 构建包含 `manifest.json`、漫画文件与封面的 ZIP 备份。
-  Future<File> createBackupArchive({ImportProgressCallback? onProgress}) async {
+  Future<File> createBackupArchive({ImportProgressCallback? onProgress}) =>
+      _withStorageOperation(() => _createBackupArchive(onProgress));
+
+  Future<File> _createBackupArchive(ImportProgressCallback? onProgress) async {
+    final books = [for (final book in _books) book.copyWith()];
+    final manifest = _buildBackupManifest(books, includeFiles: true);
     await paths.cacheDir.create(recursive: true);
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final archiveFile = File(
@@ -901,16 +1011,15 @@ class LibraryRepository extends ChangeNotifier {
     encoder.create(archiveFile.path, level: ZipFileEncoder.store);
     try {
       final manifestBytes = utf8.encode(
-        const JsonEncoder.withIndent('  ')
-            .convert(_buildBackupManifest(includeFiles: true)),
+        const JsonEncoder.withIndent('  ').convert(manifest),
       );
       encoder.addArchiveFile(
         ArchiveFile('manifest.json', manifestBytes.length, manifestBytes),
       );
 
-      final total = max(1, _books.length);
+      final total = max(1, books.length);
       var done = 0;
-      for (final book in _books) {
+      for (final book in books) {
         final source = File(book.filePath);
         if (!book.format.isAlbum && await source.exists()) {
           await encoder.addFile(
@@ -950,7 +1059,12 @@ class LibraryRepository extends ChangeNotifier {
   Future<BackupImportResult> restoreBackupBytes(
     Uint8List bytes, {
     ImportProgressCallback? onProgress,
-  }) async {
+  }) => _withStorageOperation(() => _restoreBackupBytes(bytes, onProgress));
+
+  Future<BackupImportResult> _restoreBackupBytes(
+    Uint8List bytes,
+    ImportProgressCallback? onProgress,
+  ) async {
     Archive? archive;
     Map<String, Object?> manifest;
     try {
@@ -979,7 +1093,7 @@ class LibraryRepository extends ChangeNotifier {
     }
 
     final result = BackupImportResult();
-    final wasEmpty = _books.isEmpty;
+    final wasEmpty = _retainedBooks.isEmpty;
     final backupStats = ReadingStats.fromJson(
       manifest['stats'] is Map
           ? (manifest['stats'] as Map).map(
@@ -1029,7 +1143,7 @@ class LibraryRepository extends ChangeNotifier {
         final relativeCover = _safeArchivePath(map['coverPath']);
 
         if (id.isEmpty) id = _newId();
-        final duplicate = _books.any(
+        final duplicate = _retainedBooks.any(
           (book) =>
               book.id == id ||
               (originalName.isNotEmpty &&
@@ -1148,16 +1262,19 @@ class LibraryRepository extends ChangeNotifier {
     }
     stats.merge(backupStats);
     _sortBooks();
-    await _saveNow();
+    await _saveNow(durable: true);
     notifyListeners();
     onProgress?.call('恢复完成', 1);
     return result;
   }
 
-  Map<String, Object?> _buildBackupManifest({required bool includeFiles}) {
+  Map<String, Object?> _buildBackupManifest(
+    List<ComicBook> shelfBooks, {
+    required bool includeFiles,
+  }) {
     final books = <Map<String, Object?>>[];
     final fileList = <Map<String, Object?>>[];
-    for (final book in _books) {
+    for (final book in shelfBooks) {
       final isAlbum = book.format.isAlbum;
       final json = book.toJson();
       json['filePath'] = isAlbum ? book.filePath : _relativeBookPath(book);
@@ -1181,7 +1298,7 @@ class LibraryRepository extends ChangeNotifier {
       'app': 'manhua_reader',
       'exportedAt': DateTime.now().toIso8601String(),
       'includeFiles': includeFiles,
-      'bookCount': _books.length,
+      'bookCount': shelfBooks.length,
       'settings': settings.toJson(),
       'library': librarySettings.toJson(),
       'stats': stats.toJson(),
@@ -1248,8 +1365,48 @@ class LibraryRepository extends ChangeNotifier {
     return format.extensions.contains(extension) ? extension : format.extension;
   }
 
+  Future<ComicBook?> _findIdenticalBook(
+    File source,
+    ComicFormat format,
+    int fileSize,
+  ) async {
+    final candidates = _books
+        .where((book) => book.format == format && book.fileSize == fileSize)
+        .toList();
+    if (candidates.isEmpty) return null;
+    final input = await source.open();
+    try {
+      for (final book in candidates) {
+        try {
+          final copy = await File(book.filePath).open();
+          try {
+            if (await copy.length() != fileSize) continue;
+            await input.setPosition(0);
+            const blockSize = 64 * 1024;
+            while (true) {
+              final block = await input.read(blockSize);
+              if (!listEquals(block, await copy.read(blockSize))) break;
+              if (block.isEmpty) {
+                if (_books.contains(book) && fileExists(book)) return book;
+                break;
+              }
+            }
+          } finally {
+            await copy.close();
+          }
+        } on FileSystemException {
+          // A missing or unreadable library copy cannot be reused.
+          // 无法复用缺失或无法读取的书架副本。
+        }
+      }
+      return null;
+    } finally {
+      await input.close();
+    }
+  }
+
   void _checkDuplicate(String originalName, int fileSize) {
-    if (_books.any(
+    if (_retainedBooks.any(
       (book) => book.originalName == originalName && book.fileSize == fileSize,
     )) {
       throw ImportException(
@@ -1290,6 +1447,39 @@ class LibraryRepository extends ChangeNotifier {
     notifyListeners();
     _scheduleSave();
     return changed;
+  }
+
+  /// Resets reading progress of the given books back to "not started".
+  /// Bookmarks are kept. Returns how many changed.
+  /// 把给定书籍的进度重置为「未读」，保留书签；返回实际变化的数量。
+  int markBooksUnread(Iterable<ComicBook> books) {
+    var changed = 0;
+    for (final book in {...books}) {
+      if (book.lastPage == 0 && book.lastReadAt == null) continue;
+      book.lastPage = 0;
+      book.lastReadAt = null;
+      changed++;
+    }
+    if (changed == 0) return 0;
+    _sortBooks();
+    notifyListeners();
+    _scheduleSave();
+    return changed;
+  }
+
+  /// Whether a book counts as finished, i.e. its last page has been reached.
+  /// 书籍是否算已读完，即已经读到最后一页。
+  static bool isFinished(ComicBook book) =>
+      book.pageCount > 0 &&
+      book.safeLastPage >= book.pageCount - 1 &&
+      book.lastReadAt != null;
+
+  /// Adds reading time in seconds to today's statistics.
+  /// 把阅读时长（秒）计入今天的统计。
+  void addReadingTime(int seconds) {
+    if (seconds <= 0) return;
+    stats.addSeconds(seconds, DateTime.now());
+    _scheduleSave();
   }
 
   bool isBookmarked(ComicBook book, int page) => book.isBookmarked(page);
@@ -1356,8 +1546,16 @@ class LibraryRepository extends ChangeNotifier {
     }
   }
 
-  Future<void> _releaseAlbumTreeIfUnused(String uri) async {
-    if (_books.any((book) => book.format.isAlbum && book.filePath == uri)) {
+  Future<void> _releaseAlbumTreeIfUnused(
+    String uri, {
+    Set<ComicBook> removing = const {},
+  }) async {
+    if (_retainedBooks.any(
+      (book) =>
+          !removing.contains(book) &&
+          book.format.isAlbum &&
+          book.filePath == uri,
+    )) {
       return;
     }
     await SafAlbumService.releaseTree(uri);
@@ -1441,37 +1639,210 @@ class LibraryRepository extends ChangeNotifier {
   Future<void> deleteBook(ComicBook book) => deleteBooks([book]);
 
   Future<void> deleteBooks(Iterable<ComicBook> books) async {
-    final targets = <ComicBook>{...books}.toList(growable: false);
+    final targets = _takeShelfBooks(books);
     if (targets.isEmpty) return;
-    for (final book in targets) {
-      _books.remove(book);
-      _index.remove(book);
-      PdfPasswordCache.remove(book.filePath);
-    }
+    _finalizingDeletion.addAll(targets);
     notifyListeners();
-    await _saveNow();
+    await _finishDeletion();
+  }
+
+  /// Removes books from the shelf and restarts the persisted undo window.
+  /// 从书架移除书籍，并重新开始计时，撤销期限会保存到磁盘。
+  int deleteBooksLater(Iterable<ComicBook> books, {Duration? undoWindow}) {
+    final targets = _takeShelfBooks(books);
+    if (targets.isEmpty) return _pendingDeletion.length;
+    _pendingDeletion.addAll(targets);
+    _deleteDeadline = DateTime.now().add(undoWindow ?? deleteUndoWindow);
+    _armDeletionTimer();
+    notifyListeners();
+    unawaited(_saveNow(durable: true));
+    return _pendingDeletion.length;
+  }
+
+  List<ComicBook> _takeShelfBooks(Iterable<ComicBook> books) {
+    final ids = books.map((book) => book.id).toSet();
+    final targets = _books.where((book) => ids.contains(book.id)).toList();
+    _books.removeWhere((book) => ids.contains(book.id));
     for (final book in targets) {
+      _index.remove(book);
+    }
+    return targets;
+  }
+
+  void _armDeletionTimer() {
+    _deleteTimer?.cancel();
+    _deleteTimer = null;
+    final deadline = _deleteDeadline;
+    if (_pendingDeletion.isEmpty || deadline == null) return;
+    _deleteTimer = Timer(deadline.difference(DateTime.now()), () {
+      unawaited(commitPendingDeletion());
+    });
+  }
+
+  void _clearDeletionWindow() {
+    _pendingDeletion.clear();
+    _deleteDeadline = null;
+    _deleteTimer?.cancel();
+    _deleteTimer = null;
+  }
+
+  /// Puts every pending deletion back on the shelf.
+  /// 把所有等待删除的书籍放回书架。
+  int undoPendingDeletion() {
+    if (_pendingDeletion.isEmpty) return 0;
+    final restored = List<ComicBook>.of(_pendingDeletion);
+    _clearDeletionWindow();
+    for (final book in restored) {
+      if (folderById(book.folderId) == null) book.folderId = null;
+      _books.add(book);
+      _index.upsert(book);
+    }
+    _sortBooks();
+    notifyListeners();
+    unawaited(_saveNow(durable: true));
+    return restored.length;
+  }
+
+  /// Closes the undo window and completes the recorded deletions.
+  /// 关闭撤销窗口并完成已记录的删除操作。
+  Future<void> commitPendingDeletion() async {
+    if (_pendingDeletion.isNotEmpty) {
+      _finalizingDeletion.addAll(_pendingDeletion);
+      _clearDeletionWindow();
+      if (_saved && !_disposed) notifyListeners();
+    }
+    if (_finalizingDeletion.isNotEmpty) await _finishDeletion();
+  }
+
+  Future<void> _finishDeletion() => _withStorageOperation(() async {
+    if (_finalizingDeletion.isEmpty) return;
+    final targets = _finalizingDeletion.toSet();
+    // Record the irreversible transition before touching files or permissions.
+    // 删除文件或撤销权限前，先将不可撤销的状态写入磁盘。
+    if (!await _saveNow(durable: true)) return;
+    final releasedUris = <String>{};
+    for (final book in targets) {
+      final source = book.filePath;
+      final sourceInUse = _retainedBooks.any(
+        (other) =>
+            !targets.contains(other) &&
+            !other.format.isAlbum &&
+            _pathKey(other.filePath) == _pathKey(source),
+      );
+      var removed = true;
+      if (book.format == ComicFormat.pdf) await PdfPasswordStore.forget(book);
       if (book.format.isAlbum) {
-        // Referenced albums never delete the user's source folder.
-        // 引用型相册绝不删除用户的原文件夹。
-        if (book.filePath.startsWith('content://')) {
-          await _releaseAlbumTreeIfUnused(book.filePath);
+        if (source.startsWith('content://') && releasedUris.add(source)) {
+          await _releaseAlbumTreeIfUnused(source, removing: targets);
         }
-        if (book.coverPath != null) {
-          await _deleteQuietly(File(book.coverPath!));
-        }
-        continue;
+      } else if (!sourceInUse) {
+        PdfPasswordCache.remove(source);
+        removed = await _removeManagedFile(source, paths.booksDir);
       }
-      await _deleteQuietly(File(book.filePath));
-      if (book.coverPath != null) {
-        await _deleteQuietly(File(book.coverPath!));
+      final cover = book.coverPath;
+      if (cover != null &&
+          !_retainedBooks.any(
+            (other) =>
+                !targets.contains(other) &&
+                other.coverPath != null &&
+                _pathKey(other.coverPath!) == _pathKey(cover),
+          )) {
+        final coverRemoved = await _removeManagedFile(cover, paths.coversDir);
+        removed = removed && coverRemoved;
       }
+      if (removed) _finalizingDeletion.remove(book);
+    }
+    await _saveNow(durable: true);
+  });
+
+  Future<bool> _removeManagedFile(String path, Directory directory) async {
+    if (_pathKey(p.dirname(path)) != _pathKey(directory.path)) return true;
+    final file = File(path);
+    return await _deleteFile(file) || !await file.exists();
+  }
+
+  Future<T> _withStorageOperation<T>(Future<T> Function() operation) async {
+    final previous = _storageOperation;
+    final done = Completer<void>();
+    _storageOperation = done.future;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      done.complete();
     }
   }
 
   void setReadingMode(ReadingMode mode) {
     if (settings.mode == mode) return;
     settings.mode = mode;
+    _scheduleSave();
+  }
+
+  /// Saves a reading preference for one book only; other books keep using
+  /// the global default.
+  /// 只为单本书保存阅读偏好，其他书籍继续使用全局默认值。
+  void setBookReadingMode(ComicBook book, ReadingMode mode) {
+    if (book.readingMode == mode) return;
+    book.readingMode = mode;
+    _scheduleSave();
+  }
+
+  void setBookRightToLeft(ComicBook book, bool value) {
+    if (book.rightToLeft == value) return;
+    book.rightToLeft = value;
+    _scheduleSave();
+  }
+
+  void setBookDoublePage(ComicBook book, bool value) {
+    if (book.doublePage == value) return;
+    book.doublePage = value;
+    _scheduleSave();
+  }
+
+  /// Applies a pairing offset to one book, or to the global default when
+  /// [book] is null.
+  /// 设置单本书的双页配对偏移；[book] 为 null 时设置全局默认值。
+  void setSpreadOffset(int offset, {ComicBook? book}) {
+    final next = offset.clamp(0, maxSpreadOffset);
+    if (book != null) {
+      if (book.spreadOffset == next) return;
+      book.spreadOffset = next;
+      _scheduleSave();
+      return;
+    }
+    if (settings.spreadOffset == next) return;
+    settings.spreadOffset = next;
+    _scheduleSave();
+  }
+
+  /// Makes a book follow the global reading preferences again.
+  /// 让单本书重新跟随全局阅读偏好。
+  void clearBookReadingPrefs(ComicBook book) {
+    if (book.readingMode == null &&
+        book.rightToLeft == null &&
+        book.doublePage == null &&
+        book.spreadOffset == null) {
+      return;
+    }
+    book
+      ..readingMode = null
+      ..rightToLeft = null
+      ..doublePage = null
+      ..spreadOffset = null;
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  void setTapZoneWidth(TapZoneWidth width) {
+    if (settings.tapZoneWidth == width) return;
+    settings.tapZoneWidth = width;
+    _scheduleSave();
+  }
+
+  void setAutoCrop(bool value) {
+    if (settings.autoCrop == value) return;
+    settings.autoCrop = value;
     _scheduleSave();
   }
 
@@ -1609,6 +1980,77 @@ class LibraryRepository extends ChangeNotifier {
     _scheduleSave();
   }
 
+  /// Sets the same series on several books. A blank name clears the series.
+  /// Returns how many changed.
+  /// 为多本书设置同一个系列名；留空表示清除系列。返回变化的数量。
+  int setBooksSeries(Iterable<ComicBook> books, String? series) {
+    final clean = _cleanSeries(series);
+    var changed = 0;
+    for (final book in {...books}) {
+      if (book.series == clean) continue;
+      book.series = clean;
+      _index.upsert(book);
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _scheduleSave();
+    return changed;
+  }
+
+  /// Adds [tags] to every given book (duplicates and the 20-tag cap apply).
+  /// Returns how many books changed.
+  /// 为多本书添加标签（去重并遵守 20 个标签上限），返回变化的书籍数量。
+  int addBooksTags(Iterable<ComicBook> books, Iterable<String> tags) {
+    var changed = 0;
+    for (final book in {...books}) {
+      final next = _cleanTags([...book.tags, ...tags]);
+      if (listEquals(next, book.tags)) continue;
+      book.tags = next;
+      _index.upsert(book);
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _scheduleSave();
+    return changed;
+  }
+
+  /// Removes [tags] from every given book. Returns how many books changed.
+  /// 从多本书中移除标签，返回变化的书籍数量。
+  int removeBooksTags(Iterable<ComicBook> books, Iterable<String> tags) {
+    final removal = _cleanTags(tags).toSet();
+    var changed = 0;
+    for (final book in {...books}) {
+      final next = book.tags.where((tag) => !removal.contains(tag)).toList();
+      if (next.length == book.tags.length) continue;
+      book.tags = next;
+      _index.upsert(book);
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _scheduleSave();
+    return changed;
+  }
+
+  /// Moves books into a shelf folder, or to the shelf root when [folderId]
+  /// is null. Returns how many books moved.
+  /// 把书籍移入书架文件夹；[folderId] 为 null 时移到书架根目录。
+  int moveBooksToFolder(Iterable<ComicBook> books, String? folderId) {
+    if (folderId != null && folderById(folderId) == null) return 0;
+    var changed = 0;
+    for (final book in {...books}) {
+      if (book.folderId == folderId) continue;
+      book.folderId = folderId;
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _scheduleSave();
+    return changed;
+  }
+
   /// Returns an existing folder with [name] (case-insensitive) or creates one.
   /// 返回已有的同名文件夹（大小写不敏感），不存在时创建。
   LibraryFolder ensureFolder(String name) {
@@ -1651,29 +2093,30 @@ class LibraryRepository extends ChangeNotifier {
     final affected = _books
         .where((book) => book.folderId == folder.id)
         .toList();
-    if (keepBooks) {
-      for (final book in affected) {
-        book.folderId = null;
-      }
+    for (final book in _retainedBooks) {
+      if (book.folderId == folder.id) book.folderId = null;
     }
-    notifyListeners();
-    await _saveNow();
     if (!keepBooks && affected.isNotEmpty) {
       await deleteBooks(affected);
+      return;
     }
+    notifyListeners();
+    await _saveNow(durable: true);
   }
 
   Future<void> flush() async {
     _saveTimer?.cancel();
     _saveTimer = null;
-    await _saveNow();
+    await _saveNow(durable: true);
   }
 
   @override
   void dispose() {
+    _disposed = true;
     final hasPendingSave = _saveTimer != null;
     _saveTimer?.cancel();
-    if (hasPendingSave) unawaited(_saveNow());
+    _deleteTimer?.cancel();
+    if (hasPendingSave) unawaited(_saveNow(durable: true));
     super.dispose();
   }
 
@@ -1700,35 +2143,51 @@ class LibraryRepository extends ChangeNotifier {
     });
   }
 
-  Future<void> _saveNow() async {
-    _dirty = true;
-    if (_saving) return;
-    _saving = true;
+  /// Writes the library atomically before returning.
+  ///
+  /// `library.json` only holds metadata, so the write is synchronous: that
+  /// keeps "the file is up to date" true for callers such as [flush] even when
+  /// they run on a different async zone (widget tests, platform callbacks).
+  /// Periodic saves skip the fsync to stay off the frame budget; only
+  /// [durable] writes pay for flushing to disk.
+  /// 原子写入书架；返回时文件已是最新。
+  ///
+  /// `library.json` 只保存元数据，因此采用同步写入：即使调用方处于不同的
+  /// 异步区（部件测试、平台回调），[flush] 返回时文件也一定已保存。
+  /// 周期性保存不做 fsync 以免占用帧预算，只有 [durable] 写入才落盘同步。
+  Future<bool> _saveNow({bool durable = false}) async {
+    _sortBooks();
+    final payload = jsonEncode({
+      'version': 5,
+      'settings': settings.toJson(),
+      'library': librarySettings.toJson(),
+      'stats': stats.toJson(),
+      'folders': _folders.map((folder) => folder.toJson()).toList(),
+      'books': _books.map((book) => book.toJson()).toList(),
+      if (_pendingDeletion.isNotEmpty) ...{
+        'pendingDeletion': _pendingDeletion
+            .map((book) => book.toJson())
+            .toList(),
+        'deleteDeadline': _deleteDeadline?.toUtc().toIso8601String(),
+      },
+      if (_finalizingDeletion.isNotEmpty)
+        'finalizingDeletion': _finalizingDeletion
+            .map((book) => book.toJson())
+            .toList(),
+    });
     try {
-      while (_dirty) {
-        _dirty = false;
-        _sortBooks();
-        final payload = jsonEncode({
-          'version': 4,
-          'settings': settings.toJson(),
-          'library': librarySettings.toJson(),
-          'stats': stats.toJson(),
-          'folders': _folders.map((folder) => folder.toJson()).toList(),
-          'books': _books.map((book) => book.toJson()).toList(),
-        });
-        final temp = File('${paths.libraryFile.path}.tmp');
-        await temp.writeAsString(payload, flush: true);
-        try {
-          await temp.rename(paths.libraryFile.path);
-        } on FileSystemException {
-          await paths.libraryFile.writeAsString(payload, flush: true);
-          await _deleteQuietly(temp);
-        }
+      final temp = File('${paths.libraryFile.path}.tmp');
+      temp.writeAsStringSync(payload, flush: durable);
+      try {
+        temp.renameSync(paths.libraryFile.path);
+      } on FileSystemException {
+        paths.libraryFile.writeAsStringSync(payload, flush: durable);
+        unawaited(_deleteQuietly(temp));
       }
+      return true;
     } catch (error, stack) {
       debugPrint('Library save failed: $error\n$stack');
-    } finally {
-      _saving = false;
+      return false;
     }
   }
 

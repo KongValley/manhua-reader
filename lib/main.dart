@@ -5,6 +5,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import 'app.dart';
 import 'services/app_paths.dart';
+import 'services/external_open_channel.dart';
 import 'services/library_repository.dart';
 import 'theme/app_theme.dart';
 
@@ -21,7 +22,14 @@ Future<void> main() async {
     final paths = await AppPaths.resolve();
     final repository = LibraryRepository(paths);
     await repository.load();
-    runApp(ManhuaApp(repository: repository));
+    runApp(
+      ManhuaApp(
+        repository: repository,
+        externalOpen: ExternalOpenChannel.isSupported
+            ? const ExternalOpenChannel()
+            : null,
+      ),
+    );
   } catch (error, stack) {
     debugPrint('App startup failed: $error\n$stack');
     runApp(StartupErrorApp(message: '$error'));

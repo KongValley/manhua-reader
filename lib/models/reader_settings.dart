@@ -1,3 +1,5 @@
+import '../utils/pagination.dart';
+
 enum ReadingMode {
   horizontal('横向翻页'),
   vertical('纵向滚动');
@@ -30,6 +32,29 @@ enum PageTurnAnimation {
   }
 }
 
+/// Width of the tap zones on both screen edges that turn pages.
+/// 屏幕左右两侧点击翻页区域的宽度。
+enum TapZoneWidth {
+  narrow('窄', 0.18),
+  medium('适中', 0.28),
+  wide('宽', 0.38);
+
+  const TapZoneWidth(this.label, this.fraction);
+
+  final String label;
+
+  /// Fraction of the page width taken by each side zone.
+  /// 每一侧翻页区域占页面宽度的比例。
+  final double fraction;
+
+  static TapZoneWidth fromName(String name) {
+    for (final width in values) {
+      if (width.name == name) return width;
+    }
+    return TapZoneWidth.medium;
+  }
+}
+
 /// Reader preferences, persisted together with the library.
 /// 阅读器偏好设置，与书架一起持久化。
 class ReaderSettings {
@@ -43,6 +68,9 @@ class ReaderSettings {
     this.autoTurnSeconds = 0,
     this.volumeKeys = false,
     this.pageTurnAnimation = PageTurnAnimation.paper,
+    this.spreadOffset = 1,
+    this.tapZoneWidth = TapZoneWidth.medium,
+    this.autoCrop = false,
   });
 
   ReadingMode mode;
@@ -51,6 +79,18 @@ class ReaderSettings {
   /// Show two pages side by side in horizontal mode.
   /// 横向模式下并排显示两页。
   bool doublePage;
+
+  /// Leading single pages before double-page pairing (0–2).
+  /// 双页配对前单独显示的页数（0–2）。
+  int spreadOffset;
+
+  /// Width of the side tap zones that turn pages.
+  /// 两侧点击翻页区域的宽度。
+  TapZoneWidth tapZoneWidth;
+
+  /// Trim blank margins around scanned pages automatically.
+  /// 自动裁掉扫描页四周的空白边距。
+  bool autoCrop;
 
   /// Keep the display awake while reading.
   /// 阅读时保持屏幕常亮。
@@ -84,6 +124,9 @@ class ReaderSettings {
     'autoTurnSeconds': autoTurnSeconds,
     'volumeKeys': volumeKeys,
     'pageTurnAnimation': pageTurnAnimation.name,
+    'spreadOffset': spreadOffset,
+    'tapZoneWidth': tapZoneWidth.name,
+    'autoCrop': autoCrop,
   };
 
   factory ReaderSettings.fromJson(Map<String, Object?>? json) {
@@ -107,6 +150,14 @@ class ReaderSettings {
       pageTurnAnimation: PageTurnAnimation.fromName(
         json['pageTurnAnimation'] as String? ?? '',
       ),
+      spreadOffset: ((json['spreadOffset'] as num?)?.toInt() ?? 1).clamp(
+        0,
+        maxSpreadOffset,
+      ),
+      tapZoneWidth: TapZoneWidth.fromName(
+        json['tapZoneWidth'] as String? ?? '',
+      ),
+      autoCrop: json['autoCrop'] == true,
     );
   }
 }

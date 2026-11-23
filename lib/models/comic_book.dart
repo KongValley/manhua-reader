@@ -1,4 +1,6 @@
 import 'bookmark.dart';
+import 'reader_settings.dart';
+import '../utils/pagination.dart';
 
 enum AlbumSortField {
   name('名称'),
@@ -87,6 +89,10 @@ class ComicBook {
     this.albumSort = AlbumSortField.name,
     this.albumSortDescending = false,
     List<Bookmark>? bookmarks,
+    this.readingMode,
+    this.rightToLeft,
+    this.doublePage,
+    this.spreadOffset,
   }) : bookmarks = bookmarks ?? <Bookmark>[],
        tags = tags ?? <String>[];
 
@@ -157,6 +163,23 @@ class ComicBook {
   /// 相册页面是否按降序排列。
   bool albumSortDescending;
 
+  /// Per-book reading mode override. Null follows the global setting.
+  /// 按书保存的阅读模式；为 null 时跟随全局设置。
+  ReadingMode? readingMode;
+
+  /// Per-book reading direction override. Null follows the global setting.
+  /// 按书保存的阅读方向；为 null 时跟随全局设置。
+  bool? rightToLeft;
+
+  /// Per-book double-page override. Null follows the global setting.
+  /// 按书保存的双页开关；为 null 时跟随全局设置。
+  bool? doublePage;
+
+  /// Leading single pages before double-page pairing (0–2).
+  /// Null follows the global setting.
+  /// 双页配对前单独显示的页数（0–2）；为 null 时跟随全局设置。
+  int? spreadOffset;
+
   /// User-created bookmarks, kept in ascending page order.
   /// 用户创建的书签，按页码升序保存。
   final List<Bookmark> bookmarks;
@@ -201,6 +224,10 @@ class ComicBook {
     bool? customCover,
     AlbumSortField? albumSort,
     bool? albumSortDescending,
+    ReadingMode? readingMode,
+    bool? rightToLeft,
+    bool? doublePage,
+    int? spreadOffset,
   }) {
     return ComicBook(
       id: id,
@@ -222,6 +249,10 @@ class ComicBook {
       customCover: customCover ?? this.customCover,
       albumSort: albumSort ?? this.albumSort,
       albumSortDescending: albumSortDescending ?? this.albumSortDescending,
+      readingMode: readingMode ?? this.readingMode,
+      rightToLeft: rightToLeft ?? this.rightToLeft,
+      doublePage: doublePage ?? this.doublePage,
+      spreadOffset: spreadOffset ?? this.spreadOffset,
       bookmarks: bookmarks,
     );
   }
@@ -246,6 +277,10 @@ class ComicBook {
     'customCover': customCover,
     'albumSort': albumSort.name,
     'albumSortDescending': albumSortDescending,
+    'readingMode': readingMode?.name,
+    'rightToLeft': rightToLeft,
+    'doublePage': doublePage,
+    'spreadOffset': spreadOffset,
     'bookmarks': bookmarks.map((bookmark) => bookmark.toJson()).toList(),
   };
 
@@ -268,6 +303,17 @@ class ComicBook {
     }
     final rawSeries = (json['series'] as String?)?.trim();
     final rawFolder = (json['folderId'] as String?)?.trim();
+    final rawMode = json['readingMode'] as String?;
+    final readingMode = rawMode == null
+        ? null
+        : ReadingMode.values.where((mode) => mode.name == rawMode).firstOrNull;
+    final rawSpreadOffset = (json['spreadOffset'] as num?)?.toInt();
+    final spreadOffset =
+        rawSpreadOffset == null ||
+            rawSpreadOffset < 0 ||
+            rawSpreadOffset > maxSpreadOffset
+        ? null
+        : rawSpreadOffset;
     final bookmarks =
         <Bookmark>[
             for (final item in (json['bookmarks'] as List? ?? const []))
@@ -303,6 +349,10 @@ class ComicBook {
       customCover: json['customCover'] == true,
       albumSort: AlbumSortField.fromName(json['albumSort'] as String? ?? ''),
       albumSortDescending: json['albumSortDescending'] == true,
+      readingMode: readingMode,
+      rightToLeft: json['rightToLeft'] as bool?,
+      doublePage: json['doublePage'] as bool?,
+      spreadOffset: spreadOffset,
       bookmarks: bookmarks,
     );
   }

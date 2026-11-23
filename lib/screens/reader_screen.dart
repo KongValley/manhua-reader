@@ -4,25 +4,29 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 
+import '../formats/comic_page_crop.dart';
 import '../formats/comic_source.dart';
 import '../formats/comic_source_factory.dart';
 import '../models/comic_book.dart';
 import '../models/reader_settings.dart';
 import '../models/toc_entry.dart';
 import '../services/library_repository.dart';
-import '../services/pdf_password_cache.dart';
+import '../services/pdf_password_flow.dart';
 import '../services/screen_awake.dart';
 import '../services/volume_keys.dart';
 import '../theme/app_theme.dart';
 import '../utils/auto_turn.dart';
 import '../utils/format.dart';
 import '../utils/pagination.dart';
+import '../utils/reading_clock.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/bookmark_editor_dialog.dart';
+import '../widgets/comic_page_image.dart';
 import '../widgets/paper_page_view.dart';
 import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reader_navigation_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
+import '../widgets/slider_ticks.dart';
 
 class ReaderScreen extends StatefulWidget {
   const ReaderScreen({
@@ -45,21 +49,47 @@ class _ReaderScreenState extends State<ReaderScreen>
   static const double _pageGap = 6;
 
   ComicSource? _source;
+  ComicPageCropController? _cropController;
   Object? _openError;
   bool _loading = true;
 
+  /// The book being read. Changes when the reader moves on to the next volume.
+  /// 正在阅读的书；读到下一卷时会切换。
+  late ComicBook _book;
   late ReadingMode _mode;
   late bool _rightToLeft;
   late bool _doublePage;
+  late int _spreadOffset;
+  late TapZoneWidth _tapZoneWidth;
+  late bool _autoCrop;
   int _pageCount = 0;
   int _currentPage = 0;
   List<List<int>> _spreads = const [];
   Future<List<TocEntry>>? _tocFuture;
+  List<TocEntry> _toc = const [];
+
+  /// Next volume of the series, offered on the last page.
+  /// 系列的下一卷，在最后一页提供入口。
+  ComicBook? _nextVolume;
+
+  /// Disables touch page turning for this reading session only.
+  /// 仅在本次阅读内停用触摸翻页。
+  bool _locked = false;
+
+  /// Whether vertical scrolling has reached the end of the last page.
+  /// 纵向滚动是否已到达最后一页的末尾。
+  bool _verticalAtEnd = false;
+  Timer? _readingTimeTimer;
+  final _readingClock = ReadingClock();
+  bool _routeVisible = true;
 
   PageController? _pageController;
   int? _pendingHorizontalPage;
   ScrollController? _verticalController;
   double _verticalWidth = -1;
+  double _verticalHeight = -1;
+  bool _verticalLayoutDirty = false;
+  bool _restoringVerticalPosition = false;
   List<double> _pageOffsets = const [];
 
   bool _chromeVisible = true;
@@ -76,22 +106,22 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _appActive = true;
 
   LibraryRepository get _repository => widget.repository;
-  ComicBook get _book => widget.book;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _mode = _repository.settings.mode;
-    _rightToLeft = _repository.settings.rightToLeft;
-    _doublePage = _repository.settings.doublePage;
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _appActive = lifecycle == null || lifecycle == AppLifecycleState.resumed;
+    _prepareForBook(widget.book);
+    if (widget.initialPage != null) _currentPage = widget.initialPage!;
+    _autoCrop = _repository.settings.autoCrop;
     _keepAwake = _repository.settings.keepAwake;
     _brightness = _repository.settings.brightness;
     _warmth = _repository.settings.warmth;
     _autoTurnSeconds = _repository.settings.autoTurnSeconds;
     _volumeKeys = _repository.settings.volumeKeys;
     _pageTurnAnimation = _repository.settings.pageTurnAnimation;
-    _currentPage = widget.initialPage ?? _book.safeLastPage;
     _autoTurn = AutoTurnController(
       onTurn: _autoTurnPage,
       canTurn: _canAutoTurn,
@@ -103,70 +133,185 @@ class _ReaderScreenState extends State<ReaderScreen>
     _loadSource();
   }
 
-  Future<void> _loadSource() async {
-    try {
-      var passwordAttempts = 0;
-      String? lastPassword;
-      Future<String?> passwordProvider() async {
-        passwordAttempts++;
-        if (passwordAttempts == 1) {
-          final cached = PdfPasswordCache.get(_book.filePath);
-          if (cached != null) {
-            lastPassword = cached;
-            return cached;
-          }
-        }
-        if (!mounted) return null;
-        final password = await showPdfPasswordDialog(
-          context,
-          fileName: _book.title,
-          errorText: passwordAttempts > 1 ? '密码不正确，请重试' : null,
-        );
-        if (password != null) lastPassword = password;
-        return password;
-      }
+  /// Adopts [book] together with its own reading preferences, falling back
+  /// to the global defaults for anything the book has not remembered.
+  /// 切换到 [book] 并载入它自己的阅读偏好，没有单独记录的项目跟随全局设置。
+  void _prepareForBook(ComicBook book) {
+    final settings = _repository.settings;
+    _book = book;
+    _mode = book.readingMode ?? settings.mode;
+    _rightToLeft = book.rightToLeft ?? settings.rightToLeft;
+    _doublePage = book.doublePage ?? settings.doublePage;
+    _spreadOffset = book.spreadOffset ?? settings.spreadOffset;
+    _tapZoneWidth = settings.tapZoneWidth;
+    _currentPage = book.safeLastPage;
+  }
 
-      final source = await ComicSourceFactory.open(
-        _book,
-        passwordProvider: passwordProvider,
+  Future<void> _loadSource() async {
+    final book = _book;
+    try {
+      final passwords = PdfPasswordFlow(
+        book: book,
+        prompt: (errorText) async {
+          if (!mounted || book != _book) return null;
+          return showPdfPasswordDialog(
+            context,
+            fileName: book.title,
+            errorText: errorText,
+          );
+        },
       );
-      if (!mounted) {
+      final source = await ComicSourceFactory.open(
+        book,
+        passwordProvider: passwords.provide,
+      );
+      // The reader moved on to another volume while this one was opening.
+      // 打开过程中阅读器已切换到另一卷。
+      if (!mounted || book != _book) {
         await source.dispose();
         return;
       }
-      PdfPasswordCache.put(_book.filePath, lastPassword);
+      unawaited(
+        passwords.onSuccess(book).then((saved) {
+          if (!saved && mounted && book == _book) {
+            _showReaderNotice('无法记住密码，本次仍可阅读');
+          }
+        }),
+      );
       final pageCount = source.pageCount;
-      if (_book.pageCount != pageCount) {
-        _book.pageCount = pageCount;
-        _book.lastPage = clampPage(_book.lastPage, pageCount);
-        _book.bookmarks.removeWhere(
+      if (book.pageCount != pageCount) {
+        book.pageCount = pageCount;
+        book.lastPage = clampPage(book.lastPage, pageCount);
+        book.bookmarks.removeWhere(
           (bookmark) => bookmark.page < 0 || bookmark.page >= pageCount,
         );
       }
+      final crop = ComicPageCropController(source)..addListener(_onCropChanged);
       setState(() {
         _source = source;
+        _cropController = crop;
         _pageCount = pageCount;
         _currentPage = clampPage(_currentPage, pageCount);
-        _spreads = buildSpreads(pageCount);
+        _spreads = buildSpreads(pageCount, offset: _spreadOffset);
         _tocFuture = source.loadToc();
         _pageController = _startingPageController();
         _loading = false;
       });
-      _repository.updateProgress(_book, _currentPage);
+      _nextVolume = _repository.nextVolumeInSeries(book);
+      unawaited(_adoptToc(_tocFuture!));
+      _persistProgressNow();
+      _syncReadingTimer();
+      _applyVolumeKeys();
       _scheduleAutoTurn();
       _scheduleChromeHide();
     } catch (error) {
-      if (!mounted) return;
-      final message = error.toString();
-      if (_book.format == ComicFormat.pdf &&
-          (message.contains('密码') || message.contains('取消'))) {
-        PdfPasswordCache.remove(_book.filePath);
-      }
+      if (!mounted || book != _book) return;
       setState(() {
         _openError = error;
         _loading = false;
       });
     }
+  }
+
+  Future<void> _adoptToc(Future<List<TocEntry>> future) async {
+    final toc = await future.catchError((Object _) => const <TocEntry>[]);
+    if (!mounted || future != _tocFuture) return;
+    setState(() => _toc = toc);
+  }
+
+  /// Replaces the current volume with [next] without leaving the reader, so
+  /// system UI, keep-awake and key handling stay in place.
+  /// 在阅读器内直接切换到 [next]，系统栏、常亮和按键处理保持不变。
+  Future<void> _switchToBook(ComicBook next) async {
+    if (next == _book || _loading) return;
+    if (!_repository.fileExists(next)) {
+      _showReaderNotice('下一卷文件不可用，可在书架中重新定位');
+      return;
+    }
+    _hideTimer?.cancel();
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _persistProgressNow();
+    _stopReadingTimer();
+    _autoTurn.configure(null);
+    final source = _source;
+    final crop = _cropController;
+    final pageController = _pageController;
+    final verticalController = _verticalController;
+    verticalController?.removeListener(_onVerticalScroll);
+    setState(() {
+      _source = null;
+      _cropController = null;
+      _openError = null;
+      _loading = true;
+      _tocFuture = null;
+      _toc = const [];
+      _nextVolume = null;
+      _spreads = const [];
+      _pageCount = 0;
+      _verticalAtEnd = false;
+      _pageController = null;
+      _verticalController = null;
+      _verticalWidth = -1;
+      _pageOffsets = const [];
+      _pendingHorizontalPage = null;
+      _prepareForBook(next);
+    });
+    crop?.dispose();
+    _applyVolumeKeys();
+    _disposeLater(pageController);
+    _disposeLater(verticalController);
+    if (source != null) {
+      // Let the page widgets finish tearing down before releasing PDFium.
+      // 先让页面组件完成卸载，再释放 PDFium。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(source.dispose());
+      });
+    }
+    _keepChromeVisible();
+    await _loadSource();
+  }
+
+  bool get _onLastPage =>
+      _pageCount > 0 && _visibleSpread.last >= _pageCount - 1;
+
+  /// Offers the next volume once the last page is reached.
+  /// 读到最后一页时提示可以继续下一卷。
+  void _announceLastPage() {
+    if (_nextVolume != null && _onLastPage) _keepChromeVisible();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Subscribe to route coverage, including reader menus and dialogs.
+    // 跟踪路由是否被阅读菜单或对话框覆盖。
+    _routeVisible = ModalRoute.isCurrentOf(context) ?? true;
+    _syncReadingTimer();
+    _applyVolumeKeys();
+  }
+
+  void _syncReadingTimer() {
+    if (_source == null || _loading || !_appActive || !_routeVisible) {
+      _stopReadingTimer();
+      return;
+    }
+    if (_readingClock.isRunning) return;
+    _readingClock.start();
+    _readingTimeTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _flushReadingTime(),
+    );
+  }
+
+  void _flushReadingTime() =>
+      _repository.addReadingTime(_readingClock.takeSeconds());
+
+  void _stopReadingTimer() {
+    _readingTimeTimer?.cancel();
+    _readingTimeTimer = null;
+    _readingClock.pause();
+    _flushReadingTime();
   }
 
   void _retryOpen() {
@@ -205,6 +350,72 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   String get _pageSubtitleText => '第 $_pageNumberText / $_pageCount 页';
 
+  /// Title of the chapter containing the current page, or '' when the file
+  /// has no chapter information.
+  /// 当前页所在章节的标题；文件没有章节信息时返回空字符串。
+  String get _chapterTitle {
+    TocEntry? current;
+    for (final entry in _toc) {
+      if (entry.page <= _currentPage &&
+          (current == null || entry.page >= current.page)) {
+        current = entry;
+      }
+    }
+    return current?.title ?? '';
+  }
+
+  String get _topSubtitleText {
+    final chapter = _chapterTitle;
+    return chapter.isEmpty
+        ? '${_book.format.label} · $_pageSubtitleText'
+        : '$_pageSubtitleText · $chapter';
+  }
+
+  Widget _buildNextVolumeCard() {
+    final next = _nextVolume;
+    final visible =
+        _chromeVisible &&
+        next != null &&
+        (_mode == ReadingMode.horizontal ? _onLastPage : _verticalAtEnd);
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+      left: 24,
+      right: 24,
+      // Sits just above the bottom bar while the menu is visible.
+      // 菜单显示时停在底部工具栏上方。
+      bottom: safeBottom + (_chromeVisible ? 136 : 18),
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          switchInCurve: Curves.easeOutCubic,
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.94, end: 1).animate(animation),
+              child: child,
+            ),
+          ),
+          // Keep the card out of the tree while it has nothing to offer.
+          // 没有可读的下一卷时不构建卡片。
+          child: !visible
+              ? const SizedBox.shrink()
+              : Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 420),
+                    child: _NextVolumeCard(
+                      title: next.title,
+                      onTap: () => _switchToBook(next),
+                    ),
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+
   void _enterImmersiveMode() {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     SystemChrome.setSystemUIOverlayStyle(
@@ -223,19 +434,19 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      _appActive = false;
-      _autoTurn.setActive(false);
-      unawaited(ScreenAwake.setEnabled(false));
+    final active = state == AppLifecycleState.resumed;
+    if (active == _appActive) return;
+    _appActive = active;
+    _syncReadingTimer();
+    _autoTurn.setActive(active);
+    _applyKeepAwake();
+    _applyVolumeKeys();
+    if (active) {
+      _enterImmersiveMode();
+      _scheduleAutoTurn();
+    } else {
       _persistProgressNow();
       unawaited(_repository.flush());
-    } else if (state == AppLifecycleState.resumed) {
-      _appActive = true;
-      _enterImmersiveMode();
-      _applyKeepAwake();
-      _autoTurn.setActive(true);
-      _scheduleAutoTurn();
     }
   }
 
@@ -244,7 +455,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _applyVolumeKeys() {
-    unawaited(VolumeKeys.setEnabled(_volumeKeys && VolumeKeys.isSupported));
+    unawaited(
+      VolumeKeys.setEnabled(
+        _volumeKeys && _canAutoTurn() && VolumeKeys.isSupported,
+      ),
+    );
   }
 
   void _volumeNextPage() {
@@ -267,18 +482,20 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  bool _canAutoTurn() {
-    final route = ModalRoute.of(context);
-    return route == null || route.isCurrent;
-  }
+  bool _canAutoTurn() =>
+      !_loading && _source != null && _appActive && _routeVisible;
 
   bool _autoTurnPage() {
-    if (!mounted || _pageCount <= 1) return false;
-    if (_visibleSpread.last >= _pageCount - 1) {
+    if (!mounted || !_canAutoTurn() || _pageCount <= 1) return false;
+    if (_mode == ReadingMode.vertical ? _verticalAtEnd : _onLastPage) {
       _showReaderNotice('已到最后一页，自动翻页已停止');
       return false;
     }
-    _goNext();
+    if (_mode == ReadingMode.vertical) {
+      _scrollVertical(1);
+    } else {
+      _goNext();
+    }
     return true;
   }
 
@@ -313,6 +530,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _persistProgressSoon();
     _scheduleChromeHide();
     _scheduleAutoTurn();
+    _announceLastPage();
   }
 
   void _handleSpreadChanged(int index) {
@@ -323,6 +541,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _persistProgressSoon();
     _scheduleChromeHide();
     _scheduleAutoTurn();
+    _announceLastPage();
   }
 
   void _persistProgressSoon() {
@@ -334,7 +553,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _persistProgressNow() {
-    _repository.updateProgress(_book, _currentPage);
+    if (_source == null || _loading || _pageCount == 0) return;
+    final finished = _mode == ReadingMode.vertical
+        ? _verticalAtEnd
+        : _onLastPage;
+    _repository.updateProgress(_book, finished ? _pageCount - 1 : _currentPage);
   }
 
   void _handleHorizontalSettled(int slot) {
@@ -350,7 +573,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _goToPage(int page, {bool animate = true, bool revealChrome = false}) {
-    if (_pageCount <= 0) return;
+    if (_loading || _source == null || _pageCount <= 0) return;
     final target = clampPage(page, _pageCount);
     if (revealChrome) _keepChromeVisible();
 
@@ -389,8 +612,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
 
-    if (target == _currentPage) return;
-    setState(() => _currentPage = target);
+    if (target != _currentPage) setState(() => _currentPage = target);
     _persistProgressSoon();
     final controller = _verticalController;
     if (controller == null ||
@@ -398,7 +620,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         target >= _pageOffsets.length) {
       return;
     }
-    final offset = _pageOffsets[target];
+    final offset = _pageOffsets[target].clamp(
+      0.0,
+      controller.position.maxScrollExtent,
+    );
     if (animate) {
       controller.animateTo(
         offset,
@@ -446,40 +671,20 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _setMode(ReadingMode next) {
     if (next == _mode) return;
-    _repository.setReadingMode(next);
-    final oldVertical = _verticalController;
-    final oldPage = _pageController;
-    setState(() {
-      _mode = next;
-      _pendingHorizontalPage = null;
-      _verticalWidth = -1;
-      _pageOffsets = const [];
-      if (next == ReadingMode.horizontal) {
-        _verticalController = null;
-        _pageController = _startingPageController();
-      } else {
-        _pageController = null;
-      }
-    });
-    _disposeLater(oldPage);
-    _disposeLater(oldVertical);
-    _keepChromeVisible();
-    _scheduleAutoTurn();
+    _repository
+      ..setReadingMode(next)
+      ..setBookReadingMode(_book, next);
+    _applyReadingLayout(mode: next);
   }
 
   void _toggleDirection() => _setRightToLeft(!_rightToLeft);
 
   void _setRightToLeft(bool value) {
     if (value == _rightToLeft) return;
-    _repository.setRightToLeft(value);
-    final old = _pageController;
-    setState(() {
-      _rightToLeft = value;
-      _pendingHorizontalPage = null;
-      _pageController = _startingPageController();
-    });
-    _disposeLater(old);
-    _keepChromeVisible();
+    _repository
+      ..setRightToLeft(value)
+      ..setBookRightToLeft(_book, value);
+    _applyReadingLayout(rightToLeft: value);
   }
 
   void _toggleDoublePage() {
@@ -494,27 +699,113 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  void _setDoublePage(bool next) {
-    if (_pageCount <= 1 || next == _doublePage) return;
-    _repository.setDoublePage(next);
+  void _setDoublePage(bool value) {
+    if (_pageCount <= 1 || value == _doublePage) return;
+    _repository
+      ..setDoublePage(value)
+      ..setBookDoublePage(_book, value);
+    _applyReadingLayout(doublePage: value);
+  }
+
+  void _setSpreadOffset(int offset) {
+    if (offset == _spreadOffset) return;
+    _repository
+      ..setSpreadOffset(offset)
+      ..setSpreadOffset(offset, book: _book);
+    _applyReadingLayout(spreadOffset: offset);
+  }
+
+  /// Applies the effective preferences without changing global defaults.
+  /// 应用生效的阅读偏好，不修改全局默认值。
+  void _applyReadingLayout({
+    ReadingMode? mode,
+    bool? rightToLeft,
+    bool? doublePage,
+    int? spreadOffset,
+  }) {
+    final nextMode = mode ?? _mode;
+    final nextDirection = rightToLeft ?? _rightToLeft;
+    final nextDouble = doublePage ?? _doublePage;
+    final nextOffset = spreadOffset ?? _spreadOffset;
+    final modeChanged = nextMode != _mode;
+    final rebuildHorizontal =
+        nextMode == ReadingMode.horizontal &&
+        (modeChanged ||
+            nextDirection != _rightToLeft ||
+            nextDouble != _doublePage ||
+            (nextDouble && nextOffset != _spreadOffset));
     final oldPage = _pageController;
     final oldVertical = _verticalController;
+    if (modeChanged) oldVertical?.removeListener(_onVerticalScroll);
     setState(() {
-      _doublePage = next;
-      _pendingHorizontalPage = null;
-      if (_mode != ReadingMode.horizontal) {
-        _mode = ReadingMode.horizontal;
-        _repository.setReadingMode(ReadingMode.horizontal);
+      _mode = nextMode;
+      _rightToLeft = nextDirection;
+      _doublePage = nextDouble;
+      if (nextOffset != _spreadOffset) {
+        _spreadOffset = nextOffset;
+        _spreads = buildSpreads(_pageCount, offset: nextOffset);
+      }
+      if (modeChanged) {
         _verticalController = null;
         _verticalWidth = -1;
         _pageOffsets = const [];
+        _verticalAtEnd = false;
       }
-      _pageController = _startingPageController();
+      if (modeChanged || rebuildHorizontal) {
+        _pendingHorizontalPage = null;
+        _pageController = nextMode == ReadingMode.horizontal
+            ? _startingPageController()
+            : null;
+      }
     });
-    _disposeLater(oldPage);
-    _disposeLater(oldVertical);
+    if (oldPage != _pageController) _disposeLater(oldPage);
+    if (modeChanged) _disposeLater(oldVertical);
     _keepChromeVisible();
     _scheduleAutoTurn();
+  }
+
+  void _setTapZoneWidth(TapZoneWidth value) {
+    setState(() => _tapZoneWidth = value);
+    _repository.setTapZoneWidth(value);
+  }
+
+  ComicPageCropController? get _activeCrop =>
+      _autoCrop ? _cropController : null;
+
+  void _setAutoCrop(bool value) {
+    setState(() {
+      _autoCrop = value;
+      _verticalLayoutDirty = true;
+    });
+    _repository.setAutoCrop(value);
+  }
+
+  void _onCropChanged() {
+    if (!mounted || !_autoCrop || _mode != ReadingMode.vertical) return;
+    setState(() => _verticalLayoutDirty = true);
+  }
+
+  ReaderLayoutPreferences _resetBookReadingPrefs() {
+    final settings = _repository.settings;
+    _repository.clearBookReadingPrefs(_book);
+    _applyReadingLayout(
+      mode: settings.mode,
+      rightToLeft: settings.rightToLeft,
+      doublePage: settings.doublePage,
+      spreadOffset: settings.spreadOffset,
+    );
+    return (
+      mode: _mode,
+      rightToLeft: _rightToLeft,
+      doublePage: _doublePage,
+      spreadOffset: _spreadOffset,
+    );
+  }
+
+  void _toggleLock() {
+    setState(() => _locked = !_locked);
+    _keepChromeVisible();
+    _showReaderNotice(_locked ? '已锁定触摸翻页，点按屏幕可呼出菜单' : '已解除触摸翻页锁定');
   }
 
   Future<void> _openReaderSettings() async {
@@ -527,6 +818,14 @@ class _ReaderScreenState extends State<ReaderScreen>
         mode: _mode,
         rightToLeft: _rightToLeft,
         doublePage: _doublePage,
+        spreadOffset: _spreadOffset,
+        tapZoneWidth: _tapZoneWidth,
+        autoCrop: _autoCrop,
+        hasBookPrefs:
+            _book.readingMode != null ||
+            _book.rightToLeft != null ||
+            _book.doublePage != null ||
+            _book.spreadOffset != null,
         keepAwake: _keepAwake,
         brightness: _brightness,
         warmth: _warmth,
@@ -537,6 +836,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         onModeChanged: _setMode,
         onRightToLeftChanged: _setRightToLeft,
         onDoublePageChanged: _setDoublePage,
+        onSpreadOffsetChanged: _setSpreadOffset,
+        onTapZoneWidthChanged: _setTapZoneWidth,
+        onAutoCropChanged: _setAutoCrop,
+        onResetBookPrefs: _resetBookReadingPrefs,
         onKeepAwakeChanged: (value) {
           setState(() => _keepAwake = value);
           _repository.setKeepAwake(value);
@@ -659,43 +962,77 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
-  void _ensureVerticalLayout(double width) {
-    if (width <= 0 || _source == null) return;
-    if (width == _verticalWidth && _verticalController != null) return;
-
-    final offsets = List<double>.filled(_pageCount, 0);
-    var cursor = 0.0;
-    for (var i = 0; i < _pageCount; i++) {
-      offsets[i] = cursor;
-      final size = _source!.pageSize(i);
-      final height = width * size.height / size.width;
-      cursor += height + _pageGap;
-    }
-
+  void _ensureVerticalLayout(double width, double height) {
+    final source = _source;
+    if (width <= 0 || source == null) return;
     final old = _verticalController;
-    if (old != null) {
-      old.removeListener(_onVerticalScroll);
-      _disposeLater(old);
+    if (!_verticalLayoutDirty &&
+        width == _verticalWidth &&
+        height == _verticalHeight &&
+        old != null) {
+      return;
+    }
+    final page = _currentPage;
+    var fraction = 0.0;
+    if (old != null && old.hasClients && _pageOffsets.length > page + 1) {
+      final start = _pageOffsets[page];
+      final length = _pageOffsets[page + 1] - start;
+      if (length > 0) {
+        fraction = ((old.offset - start) / length).clamp(0.0, 1.0);
+      }
     }
 
+    final crop = _activeCrop;
+    final offsets = List<double>.filled(_pageCount + 1, 0);
+    for (var index = 0; index < _pageCount; index++) {
+      final size = crop?.pageSize(index) ?? source.pageSize(index);
+      offsets[index + 1] = offsets[index] + width / size.aspectRatio + _pageGap;
+    }
     _verticalWidth = width;
+    _verticalHeight = height;
+    _verticalLayoutDirty = false;
     _pageOffsets = offsets;
-    final controller = ScrollController(
-      initialScrollOffset: offsets.isEmpty ? 0 : offsets[_currentPage],
-    );
-    controller.addListener(_onVerticalScroll);
+    final anchor =
+        offsets[page] + fraction * (offsets[page + 1] - offsets[page]);
+    final controller = old ?? ScrollController(initialScrollOffset: anchor);
+    if (old == null) controller.addListener(_onVerticalScroll);
     _verticalController = controller;
+    final restoreEnd = _verticalAtEnd;
+    _restoringVerticalPosition = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _verticalController != controller ||
+          _pageOffsets != offsets) {
+        return;
+      }
+      _restoringVerticalPosition = false;
+      if (!controller.hasClients || !controller.position.hasContentDimensions) {
+        return;
+      }
+      final position = controller.position;
+      final target = restoreEnd
+          ? position.maxScrollExtent
+          : anchor.clamp(position.minScrollExtent, position.maxScrollExtent);
+      if ((controller.offset - target).abs() > 0.5) controller.jumpTo(target);
+      _onVerticalScroll();
+    });
   }
 
   void _onVerticalScroll() {
     final controller = _verticalController;
-    if (controller == null || !controller.hasClients || _pageOffsets.isEmpty) {
+    if (_restoringVerticalPosition ||
+        controller == null ||
+        !controller.hasClients ||
+        _pageOffsets.isEmpty) {
       return;
     }
+    final position = controller.position;
+    if (!position.hasContentDimensions) return;
     final offset = controller.offset;
+    final atEnd = position.maxScrollExtent - offset < 2;
     var page = 0;
     var low = 0;
-    var high = _pageOffsets.length - 1;
+    var high = _pageCount - 1;
     while (low <= high) {
       final mid = (low + high) >> 1;
       if (_pageOffsets[mid] <= offset + 1) {
@@ -705,9 +1042,56 @@ class _ReaderScreenState extends State<ReaderScreen>
         high = mid - 1;
       }
     }
-    if (page != _currentPage) {
-      setState(() => _currentPage = page);
+    if (atEnd) page = _pageCount - 1;
+    if (page != _currentPage || atEnd != _verticalAtEnd) {
+      final reachedEnd = atEnd && !_verticalAtEnd;
+      setState(() {
+        _currentPage = page;
+        _verticalAtEnd = atEnd;
+      });
       _persistProgressSoon();
+      if (reachedEnd) _announceLastPage();
+    }
+  }
+
+  /// Scrolls the vertical reader by most of one screen in [direction].
+  /// 在纵向阅读时滚动接近一屏的距离，[direction] 为 1 向下、-1 向上。
+  void _scrollVertical(int direction) {
+    final controller = _verticalController;
+    if (controller == null || !controller.hasClients) return;
+    final position = controller.position;
+    final step = position.viewportDimension * 0.9;
+    final target = (position.pixels + direction * step)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+    if ((target - position.pixels).abs() < 0.5) return;
+    controller.animateTo(
+      target,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  /// Keyboard step forward: a page turn, or one screen in vertical mode.
+  /// 键盘前进一步：翻一页，纵向模式下滚动一屏。
+  void _stepForward() => _mode == ReadingMode.vertical
+      ? _scrollVertical(1)
+      : _goNext(revealChrome: true);
+
+  void _stepBackward() => _mode == ReadingMode.vertical
+      ? _scrollVertical(-1)
+      : _goPrevious(revealChrome: true);
+
+  void _goToEnd() {
+    final controller = _verticalController;
+    if (_mode == ReadingMode.vertical &&
+        controller != null &&
+        controller.hasClients) {
+      _keepChromeVisible();
+      controller.jumpTo(controller.position.maxScrollExtent);
+      _onVerticalScroll();
+    } else {
+      _goToPage(_pageCount - 1, revealChrome: true);
     }
   }
 
@@ -757,6 +1141,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _persistTimer?.cancel();
+    _stopReadingTimer();
     _autoTurn.dispose();
     VolumeKeys.stop();
     unawaited(VolumeKeys.setEnabled(false));
@@ -767,6 +1152,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _verticalController?.dispose();
     final source = _source;
     _source = null;
+    _cropController?.dispose();
     if (source != null) {
       // Let the page widgets finish tearing down before releasing PDFium.
       // 先让页面组件完成卸载，再释放 PDFium。
@@ -802,8 +1188,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       const SingleActivator(LogicalKeyboardKey.arrowRight): () => _rightToLeft
           ? _goPrevious(revealChrome: true)
           : _goNext(revealChrome: true),
-      const SingleActivator(LogicalKeyboardKey.space): () =>
-          _goNext(revealChrome: true),
+      const SingleActivator(LogicalKeyboardKey.arrowUp): _stepBackward,
+      const SingleActivator(LogicalKeyboardKey.arrowDown): _stepForward,
+      const SingleActivator(LogicalKeyboardKey.pageUp): _stepBackward,
+      const SingleActivator(LogicalKeyboardKey.pageDown): _stepForward,
+      const SingleActivator(LogicalKeyboardKey.home): () =>
+          _goToPage(0, revealChrome: true),
+      const SingleActivator(LogicalKeyboardKey.end): _goToEnd,
+      const SingleActivator(LogicalKeyboardKey.space): _stepForward,
       const SingleActivator(LogicalKeyboardKey.escape): () =>
           Navigator.of(context).maybePop(),
     };
@@ -845,6 +1237,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 ),
               _buildTopBar(),
               _buildBottomBar(),
+              _buildNextVolumeCard(),
             ],
           ),
         ),
@@ -864,11 +1257,20 @@ class _ReaderScreenState extends State<ReaderScreen>
         spreads: _usesSpreads ? _spreads : null,
         background: AppColors.readerBackground,
         paperAnimation: _pageTurnAnimation == PageTurnAnimation.paper,
+        scrollable: !_locked,
+        cropController: _activeCrop,
         onSettled: _handleHorizontalSettled,
         wrapPage: (child, onZoomChanged) => _ZoomablePage(
           onTap: _toggleChrome,
-          onTapLeft: _rightToLeft ? _goNext : _goPrevious,
-          onTapRight: _rightToLeft ? _goPrevious : _goNext,
+          // While locked, any tap toggles the menu instead of turning pages.
+          // 锁定后，点按任意位置都只切换菜单，不再翻页。
+          onTapLeft: _locked
+              ? null
+              : () => _rightToLeft ? _goNext() : _goPrevious(),
+          onTapRight: _locked
+              ? null
+              : () => _rightToLeft ? _goPrevious() : _goNext(),
+          sideFraction: _tapZoneWidth.fraction,
           onZoomChanged: onZoomChanged,
           child: child,
         ),
@@ -877,17 +1279,20 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        _ensureVerticalLayout(constraints.maxWidth);
+        _ensureVerticalLayout(constraints.maxWidth, constraints.maxHeight);
         final controller = _verticalController;
         if (controller == null) return const SizedBox();
         return ListView.builder(
           controller: controller,
+          physics: _locked ? const NeverScrollableScrollPhysics() : null,
           padding: EdgeInsets.zero,
           scrollCacheExtent: const ScrollCacheExtent.pixels(1200),
           itemCount: _pageCount,
+          itemExtentBuilder: (index, _) =>
+              _pageOffsets[index + 1] - _pageOffsets[index],
           itemBuilder: (context, index) {
-            final size = source.pageSize(index);
-            final height = constraints.maxWidth * size.height / size.width;
+            final height =
+                _pageOffsets[index + 1] - _pageOffsets[index] - _pageGap;
             return Padding(
               padding: const EdgeInsets.only(bottom: _pageGap),
               child: SizedBox(
@@ -896,9 +1301,21 @@ class _ReaderScreenState extends State<ReaderScreen>
                 child: _ZoomablePage(
                   key: ValueKey('v-$index'),
                   onTap: _toggleChrome,
-                  onTapLeft: null,
-                  onTapRight: null,
-                  child: source.buildPage(context, index),
+                  // Tapping the side zones scrolls one screen, mirroring the
+                  // left/right page turns of horizontal mode.
+                  // 点按两侧区域滚动一屏，与横向模式的左右翻页保持一致。
+                  onTapLeft: _locked
+                      ? null
+                      : () => _scrollVertical(_rightToLeft ? 1 : -1),
+                  onTapRight: _locked
+                      ? null
+                      : () => _scrollVertical(_rightToLeft ? -1 : 1),
+                  sideFraction: _tapZoneWidth.fraction,
+                  child: ComicPageImage(
+                    source: source,
+                    index: index,
+                    cropController: _activeCrop,
+                  ),
                 ),
               ),
             );
@@ -975,7 +1392,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '${_book.format.label} · $_pageSubtitleText',
+                              _topSubtitleText,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontSize: 11,
                                 color: Colors.white.withValues(alpha: 0.7),
@@ -1075,36 +1494,70 @@ class _ReaderScreenState extends State<ReaderScreen>
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          trackHeight: 2.5,
-                          thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 6,
+                      Row(
+                        children: [
+                          Expanded(
+                            child: SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                trackHeight: 2.5,
+                                trackShape: const RoundedRectSliderTrackShape(),
+                                thumbShape: const RoundSliderThumbShape(
+                                  enabledThumbRadius: 6,
+                                ),
+                                overlayShape: const RoundSliderOverlayShape(
+                                  overlayRadius: 16,
+                                ),
+                              ),
+                              child: Stack(
+                                children: [
+                                  Slider(
+                                    value: value,
+                                    max: maxPage,
+                                    onChangeStart: _pageCount > 1
+                                        ? (_) {
+                                            _sliderActive = true;
+                                            _hideTimer?.cancel();
+                                          }
+                                        : null,
+                                    onChanged: _pageCount > 1
+                                        ? (value) => _goToPage(
+                                            value.round(),
+                                            animate: false,
+                                            revealChrome: true,
+                                          )
+                                        : null,
+                                    onChangeEnd: _pageCount > 1
+                                        ? (_) {
+                                            _sliderActive = false;
+                                            _scheduleChromeHide();
+                                          }
+                                        : null,
+                                  ),
+                                  if (_book.bookmarks.isNotEmpty)
+                                    Positioned.fill(
+                                      child: SliderTicks(
+                                        fractions: [
+                                          for (final bookmark
+                                              in _book.bookmarks)
+                                            bookmark.page / maxPage,
+                                        ],
+                                        color: AppColors.accent,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
-                        child: Slider(
-                          value: value,
-                          max: maxPage,
-                          onChangeStart: _pageCount > 1
-                              ? (value) {
-                                  _sliderActive = true;
-                                  _hideTimer?.cancel();
-                                }
-                              : null,
-                          onChanged: _pageCount > 1
-                              ? (value) => _goToPage(
-                                  value.round(),
-                                  animate: false,
-                                  revealChrome: true,
-                                )
-                              : null,
-                          onChangeEnd: _pageCount > 1
-                              ? (value) {
-                                  _sliderActive = false;
-                                  _scheduleChromeHide();
-                                }
-                              : null,
-                        ),
+                          const SizedBox(width: 4),
+                          _ReaderIconButton(
+                            icon: _locked
+                                ? Icons.lock_rounded
+                                : Icons.lock_open_rounded,
+                            tooltip: _locked ? '解除触摸锁定' : '锁定触摸翻页',
+                            active: _locked,
+                            onPressed: _toggleLock,
+                          ),
+                        ],
                       ),
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1195,6 +1648,7 @@ class _ZoomablePage extends StatefulWidget {
     required this.onTap,
     required this.onTapLeft,
     required this.onTapRight,
+    this.sideFraction = 0.28,
     this.onZoomChanged,
     super.key,
   });
@@ -1203,6 +1657,10 @@ class _ZoomablePage extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback? onTapLeft;
   final VoidCallback? onTapRight;
+
+  /// Width of each page-turning side zone, as a fraction of the page.
+  /// 两侧翻页区域各占页面宽度的比例。
+  final double sideFraction;
   final ValueChanged<bool>? onZoomChanged;
 
   @override
@@ -1234,10 +1692,11 @@ class _ZoomablePageState extends State<_ZoomablePage> {
       return;
     }
     final width = context.size?.width ?? 0;
+    final side = widget.sideFraction.clamp(0.1, 0.45);
     final x = details.localPosition.dx;
-    if (x < width * 0.28) {
+    if (x < width * side) {
       widget.onTapLeft!();
-    } else if (x > width * 0.72) {
+    } else if (x > width * (1 - side)) {
       widget.onTapRight!();
     } else {
       widget.onTap();
@@ -1287,7 +1746,82 @@ class _ZoomablePageState extends State<_ZoomablePage> {
         panEnabled: _zoomed,
         scaleEnabled: true,
         clipBehavior: Clip.hardEdge,
-        child: SizedBox.expand(child: widget.child),
+        child: SizedBox.expand(
+          child: PageRenderScale(controller: _controller, child: widget.child),
+        ),
+      ),
+    );
+  }
+}
+
+class _NextVolumeCard extends StatelessWidget {
+  const _NextVolumeCard({required this.title, required this.onTap});
+
+  final String title;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceHigh,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.45),
+            blurRadius: 22,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.auto_stories_rounded,
+            size: 22,
+            color: AppColors.accent,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '已读完本卷',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.white.withValues(alpha: 0.6),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '下一卷：$title',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          FilledButton(
+            onPressed: onTap,
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: const Color(0xFF2A1500),
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+            ),
+            child: const Text('继续阅读'),
+          ),
+        ],
       ),
     );
   }

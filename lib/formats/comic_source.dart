@@ -52,6 +52,14 @@ abstract class ComicSource {
   }
 }
 
+/// A source that can produce a new bitmap for the requested pixel budget.
+/// 能按指定像素预算生成新位图的来源。
+abstract interface class ComicPageRenderer {
+  /// Renders the whole page within [targetSize]. The caller owns the image.
+  /// 在 [targetSize] 范围内渲染完整页面，由调用者释放图像。
+  Future<ui.Image> renderPageImage(int index, Size targetSize);
+}
+
 /// Raised when a comic cannot be opened (missing file, bad format, DRM, ...).
 /// 漫画无法打开时抛出（文件缺失、格式错误、DRM 等）。
 class ComicOpenException implements Exception {

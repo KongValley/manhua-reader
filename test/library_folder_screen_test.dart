@@ -71,19 +71,39 @@ Future<_Harness> _pumpLibrary(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 600));
 
   addTearDown(() async {
-    await tester.pumpWidget(const SizedBox());
-    await tester.runAsync(() async {
-      await harness.repository.flush();
+    try {
+      await _flushLibrary(tester, harness.repository);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
       harness.repository.dispose();
-      if (await harness.temp.exists()) {
-        await harness.temp.delete(recursive: true);
-      }
-    });
-    tester.view.resetPhysicalSize();
-    tester.view.resetDevicePixelRatio();
+      await tester.runAsync(() async {
+        if (await harness.temp.exists()) {
+          await harness.temp.delete(recursive: true);
+        }
+      });
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    }
   });
 
   return harness;
+}
+
+Future<void> _flushLibrary(
+  WidgetTester tester,
+  LibraryRepository repository,
+) async {
+  // A widget-triggered write resumes in fake time after real filesystem I/O.
+  // 控件触发的写入完成真实文件操作后，会在虚拟时间中继续执行。
+  var complete = false;
+  final flush = repository.flush().whenComplete(() => complete = true);
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!complete && DateTime.now().isBefore(deadline)) {
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 1)));
+    await tester.pump();
+  }
+  expect(complete, isTrue, reason: 'The library write must finish before teardown.');
+  await flush;
 }
 
 void main() {
@@ -120,7 +140,7 @@ void main() {
 
     expect(harness.repository.folders.single.name, '改名的文件夹');
     expect(find.text('改名的文件夹'), findsWidgets);
-    await tester.runAsync(harness.repository.flush);
+    await _flushLibrary(tester, harness.repository);
   });
 
   testWidgets('renames and deletes a folder from the shelf card', (
