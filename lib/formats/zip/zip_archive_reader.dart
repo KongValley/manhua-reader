@@ -116,6 +116,7 @@ class ZipArchiveReader {
     if (index < 0 || index >= pages.length) {
       throw RangeError.index(index, pages, 'index');
     }
+    _ensureOpen();
     final cached = _cache.remove(index);
     if (cached != null) {
       _cache[index] = cached;
@@ -123,10 +124,21 @@ class ZipArchiveReader {
     }
     return _exclusive(() async {
       _ensureOpen();
+      final cachedInside = _cache.remove(index);
+      if (cachedInside != null) {
+        _cache[index] = cachedInside;
+        return cachedInside;
+      }
       final page = pages[index];
       final dataOffset = await _dataOffset(page);
+      final maxCompressed = page.method == 0 ? maxPageBytes : maxPageBytes * 2;
+      if (page.compressedSize > maxCompressed) {
+        throw ZipArchiveException('压缩包内单页超过 64 MB');
+      }
       final compressed = await _read(_file, dataOffset, page.compressedSize);
       final bytes = _decompress(page, compressed);
+      final existing = _cache.remove(index);
+      if (existing != null) _cachedBytes -= existing.length;
       _cache[index] = bytes;
       _cachedBytes += bytes.length;
       while ((_cache.length > _cacheLimit || _cachedBytes > _cacheByteLimit) &&
@@ -198,6 +210,9 @@ class ZipArchiveReader {
     return result;
   }
 
+  static bool _rangeExceeds(int offset, int size, int limit) =>
+      offset < 0 || size < 0 || offset > limit || size > limit - offset;
+
   Future<int> _dataOffset(ZipPage page) async {
     final header = await _read(_file, page.localHeaderOffset, 30);
     if (_u32le(header, 0) != _localHeaderSignature) {
@@ -206,9 +221,7 @@ class ZipArchiveReader {
     final nameLength = _u16le(header, 26);
     final extraLength = _u16le(header, 28);
     final offset = page.localHeaderOffset + 30 + nameLength + extraLength;
-    if (offset < 0 ||
-        page.compressedSize < 0 ||
-        offset + page.compressedSize > _length) {
+    if (_rangeExceeds(offset, page.compressedSize, _length)) {
       throw ZipArchiveException('压缩包数据不完整');
     }
     return offset;
@@ -222,11 +235,15 @@ class ZipArchiveReader {
       return compressed;
     }
     try {
-      final bytes = ZLibDecoder(raw: true).convert(compressed);
-      if (bytes.length > maxPageBytes) {
-        throw ZipArchiveException('压缩包内单页超过 64 MB');
+      final sink = _BoundedSink(maxPageBytes);
+      final decoder = ZLibDecoder(raw: true).startChunkedConversion(sink);
+      const chunkSize = 64 * 1024;
+      for (var offset = 0; offset < compressed.length; offset += chunkSize) {
+        final end = math.min(offset + chunkSize, compressed.length);
+        decoder.add(compressed.sublist(offset, end));
       }
-      return bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+      decoder.close();
+      return sink.takeBytes();
     } on ZipArchiveException {
       rethrow;
     } catch (_) {
@@ -291,7 +308,7 @@ class ZipArchiveReader {
         throw ZipArchiveException('ZIP64 索引不完整');
       }
       final zip64Offset = _u64le(locator, 8);
-      if (zip64Offset < 0 || zip64Offset + 56 > length) {
+      if (_rangeExceeds(zip64Offset, 56, length)) {
         throw ZipArchiveException('ZIP64 索引不完整');
       }
       final zip64 = await _read(file, zip64Offset, 56);
@@ -303,13 +320,11 @@ class ZipArchiveReader {
       directoryOffset = _u64le(zip64, 48);
     }
 
-    if (totalEntries > maxEntries) {
+    if (totalEntries < 0 || totalEntries > maxEntries) {
       throw ZipArchiveException('压缩包内文件过多');
     }
-    if (directorySize < 0 ||
-        directorySize > _maxCentralDirectoryBytes ||
-        directoryOffset < 0 ||
-        directoryOffset + directorySize > length) {
+    if (directorySize > _maxCentralDirectoryBytes ||
+        _rangeExceeds(directoryOffset, directorySize, length)) {
       throw ZipArchiveException('ZIP 中央目录超出文件范围');
     }
     if (totalEntries == 0) return const _ZipDirectory([]);
@@ -345,24 +360,24 @@ class ZipArchiveReader {
         while (extraCursor + 4 <= extraEnd) {
           final id = _u16le(directory, extraCursor);
           final size = _u16le(directory, extraCursor + 2);
+          final blockEnd = math.min(extraEnd, extraCursor + 4 + size);
           var valueCursor = extraCursor + 4;
           if (id == 0x0001) {
             if (uncompressedSize == 0xFFFFFFFF &&
-                valueCursor + 8 <= extraCursor + 4 + size) {
+                valueCursor + 8 <= blockEnd) {
               uncompressedSize = _u64le(directory, valueCursor);
               valueCursor += 8;
             }
-            if (compressedSize == 0xFFFFFFFF &&
-                valueCursor + 8 <= extraCursor + 4 + size) {
+            if (compressedSize == 0xFFFFFFFF && valueCursor + 8 <= blockEnd) {
               compressedSize = _u64le(directory, valueCursor);
               valueCursor += 8;
             }
-            if (localOffset == 0xFFFFFFFF &&
-                valueCursor + 8 <= extraCursor + 4 + size) {
+            if (localOffset == 0xFFFFFFFF && valueCursor + 8 <= blockEnd) {
               localOffset = _u64le(directory, valueCursor);
             }
             break;
           }
+          if (extraCursor + 4 + size > extraEnd) break;
           extraCursor += 4 + size;
         }
       }
@@ -420,6 +435,28 @@ class _ZipDirectory {
   const _ZipDirectory(this.entries);
 
   final List<ZipPage> entries;
+}
+
+class _BoundedSink implements Sink<List<int>> {
+  _BoundedSink(this.limit);
+
+  final int limit;
+  final BytesBuilder _builder = BytesBuilder(copy: false);
+  int _length = 0;
+
+  @override
+  void add(List<int> data) {
+    if (_length + data.length > limit) {
+      throw ZipArchiveException('压缩包内单页超过 64 MB');
+    }
+    _builder.add(data);
+    _length += data.length;
+  }
+
+  @override
+  void close() {}
+
+  Uint8List takeBytes() => _builder.takeBytes();
 }
 
 class _PrefixSink implements Sink<List<int>> {

@@ -18,8 +18,12 @@ class FolderImportScanner {
     Directory root, {
     int maxFiles = defaultMaxFiles,
   }) async {
+    if (maxFiles <= 0) return const [];
     final files = <File>[];
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
+    final stream = root
+        .list(recursive: true, followLinks: false)
+        .handleError((Object _, StackTrace _) {});
+    await for (final entity in stream) {
       if (entity is! File) continue;
       if (!isImportableName(entity.path)) continue;
       files.add(entity);
@@ -35,16 +39,14 @@ class FolderImportScanner {
     Iterable<String> paths, {
     int maxFiles = defaultMaxFiles,
   }) async {
+    if (maxFiles <= 0) return const [];
     final files = <File>[];
     final seen = <String>{};
     for (final path in paths) {
       if (files.length >= maxFiles) break;
       final type = FileSystemEntity.typeSync(path, followLinks: false);
       if (type == FileSystemEntityType.directory) {
-        final scanned = await scanFolder(
-          Directory(path),
-          maxFiles: maxFiles - files.length,
-        );
+        final scanned = await scanFolder(Directory(path), maxFiles: maxFiles);
         for (final file in scanned) {
           final key = _pathKey(file.path);
           if (seen.add(key)) files.add(file);

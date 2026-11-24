@@ -8,12 +8,11 @@ import '../formats/album_comic_source.dart';
 import '../formats/comic_source.dart';
 import '../formats/comic_source_factory.dart';
 import '../models/comic_book.dart';
-import '../services/external_open_channel.dart';
 import '../services/library_repository.dart';
 import '../services/saf_album_service.dart';
 import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
-import 'reader_screen.dart';
+import '../utils/book_navigation.dart';
 
 typedef _AlbumSortChoice = ({AlbumSortField field, bool descending});
 
@@ -194,16 +193,13 @@ class _AlbumScreenState extends State<AlbumScreen> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  void _openPage(int page) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        settings: const RouteSettings(name: readerRouteName),
-        builder: (context) => ReaderScreen(
-          book: widget.book,
-          repository: widget.repository,
-          initialPage: page,
-        ),
-      ),
+  Future<void> _openPage(int page) async {
+    if (_sorting) return;
+    await openComicBook(
+      context,
+      book: widget.book,
+      repository: widget.repository,
+      page: page,
     );
   }
 

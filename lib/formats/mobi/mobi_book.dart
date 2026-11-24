@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:path/path.dart' as p;
 
 import '../../models/toc_entry.dart';
+import '../zip/image_size.dart';
 
 /// Thrown when a MOBI file cannot be read as a comic.
 /// MOBI 文件无法作为漫画读取时抛出。
@@ -178,6 +179,7 @@ class MobiBook {
 
       final textInfo = await _readMobiText(
         raf: raf,
+        fileLength: fileLength,
         offsets: offsets,
         recordCount: recordCount,
         endOfRecord: recordEnd,
@@ -185,6 +187,7 @@ class MobiBook {
         textRecordCount: info.textRecordCount,
         compression: info.compression,
         encoding: info.encoding,
+        extraDataFlags: info.extraDataFlags,
       );
 
       final readingOrder = _buildReadingOrder(
@@ -316,6 +319,7 @@ class _MobiHeaderInfo {
     required this.compression,
     required this.textRecordCount,
     required this.encoding,
+    required this.extraDataFlags,
     this.title,
     this.language,
     this.coverEmbed,
@@ -325,6 +329,7 @@ class _MobiHeaderInfo {
   final int compression;
   final int textRecordCount;
   final int encoding;
+  final int extraDataFlags;
   final String? title;
   final String? language;
   final String? coverEmbed;
@@ -339,13 +344,20 @@ _MobiHeaderInfo _readMobiHeader(Uint8List record0) {
   var firstImageRecord = 0;
   final compression = record0.length >= 2 ? _u16be(record0, 0) : 0;
   final textRecordCount = record0.length >= 10 ? _u16be(record0, 8) : 0;
-  final encoding = record0.length >= 32 ? _u32be(record0, 28) : 65001;
+  final encoding = record0.length >= 32 && headerLength >= 16
+      ? _u32be(record0, 28)
+      : 65001;
+  final extraDataFlags =
+      headerLength >= 228 &&
+          record0.length >= 244 &&
+          16 + headerLength >= 244
+      ? _u32be(record0, 240)
+      : 0;
   String? title;
   String? language;
   String? coverEmbed;
 
-  if (record0.length >= 132) {
-    firstImageRecord = _u32be(record0, 108);
+  if (headerLength >= 76 && record0.length >= 92) {
     final fullNameOffset = _u32be(record0, 84);
     final fullNameLength = _u32be(record0, 88);
     if (fullNameOffset > 0 &&
@@ -355,6 +367,9 @@ _MobiHeaderInfo _readMobiHeader(Uint8List record0) {
         record0.sublist(fullNameOffset, fullNameOffset + fullNameLength),
       );
     }
+  }
+  if (headerLength >= 96 && record0.length >= 112) {
+    firstImageRecord = _u32be(record0, 108);
   }
 
   final exthOffset = 16 + headerLength;
@@ -389,6 +404,7 @@ _MobiHeaderInfo _readMobiHeader(Uint8List record0) {
     compression: compression,
     textRecordCount: textRecordCount,
     encoding: encoding,
+    extraDataFlags: extraDataFlags,
     title: title,
     language: language,
     coverEmbed: coverEmbed,
@@ -468,45 +484,8 @@ _ImageSize? _imageSize(Uint8List bytes, MobiImageType type) {
 }
 
 _ImageSize? _jpegSize(Uint8List bytes) {
-  if (bytes.length < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8) {
-    return null;
-  }
-  var i = 2;
-  while (i + 1 < bytes.length) {
-    if (bytes[i] != 0xFF) {
-      i++;
-      continue;
-    }
-    while (i < bytes.length && bytes[i] == 0xFF) {
-      i++;
-    }
-    if (i >= bytes.length) return null;
-    final marker = bytes[i++];
-    if (marker == 0x01 ||
-        marker == 0xD8 ||
-        marker == 0xD9 ||
-        (marker >= 0xD0 && marker <= 0xD7)) {
-      continue;
-    }
-    if (i + 2 > bytes.length) return null;
-    final segmentLength = _u16be(bytes, i);
-    if (segmentLength < 2) return null;
-
-    final isStartOfFrame =
-        marker >= 0xC0 &&
-        marker <= 0xCF &&
-        marker != 0xC4 &&
-        marker != 0xC8 &&
-        marker != 0xCC;
-    if (isStartOfFrame) {
-      if (i + 7 > bytes.length) return null;
-      final height = _u16be(bytes, i + 3);
-      final width = _u16be(bytes, i + 5);
-      return width > 0 && height > 0 ? _ImageSize(width, height) : null;
-    }
-    i += segmentLength;
-  }
-  return null;
+  final size = readJpegDimensions(bytes);
+  return size == null ? null : _ImageSize(size.width, size.height);
 }
 
 _ImageSize? _webpSize(Uint8List bytes) {
@@ -619,6 +598,7 @@ class _MobiReadingOrder {
 /// 封面缩略图。
 Future<_MobiTextInfo?> _readMobiText({
   required RandomAccessFile raf,
+  required int fileLength,
   required List<int> offsets,
   required int recordCount,
   required int Function(int) endOfRecord,
@@ -626,6 +606,7 @@ Future<_MobiTextInfo?> _readMobiText({
   required int textRecordCount,
   required int compression,
   required int encoding,
+  required int extraDataFlags,
 }) async {
   if (textRecordCount <= 0 || recordCount <= 1) return null;
   if (compression != 0 && compression != 1 && compression != 2) return null;
@@ -641,9 +622,11 @@ Future<_MobiTextInfo?> _readMobiText({
     final offset = offsets[i];
     final end = endOfRecord(i);
     final length = end - offset;
-    if (length <= 0) continue;
+    if (length <= 0 || offset < 0 || end > fileLength) continue;
+    if (length > 16 * 1024 * 1024) return null;
     await raf.setPosition(offset);
-    final raw = await raf.read(length);
+    final raw = _stripExtraData(await raf.read(length), extraDataFlags);
+    if (raw.isEmpty) continue;
     final decoded = compression == 2 ? _palmDocDecompress(raw) : raw;
     total += decoded.length;
     if (total > 16 * 1024 * 1024) return null;
@@ -754,6 +737,32 @@ _MobiReadingOrder _buildReadingOrder({
   return _MobiReadingOrder(images, toc);
 }
 
+Uint8List _stripExtraData(Uint8List raw, int extraDataFlags) {
+  if (extraDataFlags == 0 || raw.isEmpty) return raw;
+  var end = raw.length;
+  for (var bit = 1; bit < 16; bit++) {
+    if ((extraDataFlags & (1 << bit)) == 0) continue;
+    if (end <= 0) break;
+    var pos = end - 1;
+    var size = 0;
+    var shift = 0;
+    while (pos >= 0 && shift < 28) {
+      final b = raw[pos--];
+      size |= (b & 0x7F) << shift;
+      shift += 7;
+      if ((b & 0x80) != 0) break;
+    }
+    if (size > 0 && size <= end) {
+      end -= size;
+    }
+  }
+  if ((extraDataFlags & 1) != 0 && end > 0) {
+    final overlapSize = (raw[end - 1] & 0x03) + 1;
+    if (overlapSize <= end) end -= overlapSize;
+  }
+  return end == raw.length ? raw : raw.sublist(0, end);
+}
+
 Uint8List _palmDocDecompress(Uint8List input) {
   final output = <int>[];
   var i = 0;
@@ -771,8 +780,9 @@ Uint8List _palmDocDecompress(Uint8List input) {
     } else if (c <= 0xBF) {
       if (i >= input.length) break;
       final d = input[i++];
-      final distance = ((c & 0x3F) << 8) | d;
-      final length = 3 + ((c >> 3) & 0x07);
+      final distance = ((c & 0x3F) << 5) | (d >> 3);
+      final length = 3 + (d & 0x07);
+      if (distance <= 0) continue;
       final start = output.length - distance;
       if (start < 0) continue;
       for (var j = 0; j < length; j++) {
@@ -819,11 +829,20 @@ String _plainText(String html) {
     final code = match.group(0)!.toLowerCase().startsWith('&#x')
         ? int.tryParse(token, radix: 16)
         : int.tryParse(token);
-    return code == null ? match.group(0)! : String.fromCharCode(code);
+    if (code == null ||
+        code < 0 ||
+        code > 0x10FFFF ||
+        (code >= 0xD800 && code <= 0xDFFF)) {
+      return match.group(0)!;
+    }
+    return String.fromCharCode(code);
   });
   text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
   if (text.length > 160) {
-    text = '${text.substring(0, 160)}…';
+    var cut = 160;
+    final last = text.codeUnitAt(cut - 1);
+    if (last >= 0xD800 && last <= 0xDBFF) cut--;
+    text = '${text.substring(0, cut)}…';
   }
   return text;
 }

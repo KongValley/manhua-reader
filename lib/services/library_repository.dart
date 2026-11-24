@@ -77,6 +77,14 @@ class LibraryRepository extends ChangeNotifier {
 
   List<ComicBook> get books => List<ComicBook>.unmodifiable(_books);
 
+  ComicBook? bookById(String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final book in _books) {
+      if (book.id == id) return book;
+    }
+    return null;
+  }
+
   List<String> get seriesNames => _index.seriesNames;
   List<String> get tagNames => _index.tagNames;
   Map<String, int> get seriesCounts => _index.seriesCounts;
@@ -114,6 +122,23 @@ class LibraryRepository extends ChangeNotifier {
     yield* _books;
     yield* _pendingDeletion;
     yield* _finalizingDeletion;
+  }
+
+  /// Active and undoable books checked for duplicate imports.
+  /// 导入查重时检查的在架及待撤销书籍。
+  Iterable<ComicBook> get _activeBooks sync* {
+    yield* _books;
+    yield* _pendingDeletion;
+  }
+
+  bool _isCoverReferencedElsewhere(String coverPath, ComicBook current) {
+    final key = _pathKey(coverPath);
+    return _retainedBooks.any(
+      (other) =>
+          other.id != current.id &&
+          other.coverPath != null &&
+          _pathKey(other.coverPath!) == key,
+    );
   }
 
   /// Number of deleted books that can still be restored.
@@ -197,19 +222,19 @@ class LibraryRepository extends ChangeNotifier {
           final foldersJson = decoded['folders'];
           _folders.clear();
           if (foldersJson is List) {
-            _folders.addAll(
-              foldersJson
-                  .whereType<Map>()
-                  .map(
-                    (json) => LibraryFolder.fromJson(
-                      json.map((key, value) => MapEntry('$key', value)),
-                    ),
-                  )
-                  .where(
-                    (folder) =>
-                        folder.id.isNotEmpty && folder.name.trim().isNotEmpty,
-                  ),
-            );
+            for (final item in foldersJson) {
+              if (item is! Map) continue;
+              try {
+                final folder = LibraryFolder.fromJson(
+                  item.map((key, value) => MapEntry('$key', value)),
+                );
+                if (folder.id.isNotEmpty && folder.name.trim().isNotEmpty) {
+                  _folders.add(folder);
+                }
+              } catch (error) {
+                debugPrint('Skipped corrupt folder entry: $error');
+              }
+            }
           }
           settings = ReaderSettings.fromJson(
             decoded['settings'] is Map
@@ -293,16 +318,27 @@ class LibraryRepository extends ChangeNotifier {
 
   Iterable<ComicBook> _decodeBooks(Object? data) {
     if (data is! List) return const [];
-    return data
-        .whereType<Map>()
-        .map((json) => ComicBook.fromJson(Map<String, dynamic>.from(json)))
-        .where((book) => book.id.isNotEmpty && book.filePath.isNotEmpty);
+    final books = <ComicBook>[];
+    for (final item in data) {
+      if (item is! Map) continue;
+      try {
+        final book = ComicBook.fromJson(
+          item.map((key, value) => MapEntry('$key', value)),
+        );
+        if (book.id.isNotEmpty && book.filePath.isNotEmpty) {
+          books.add(book);
+        }
+      } catch (error) {
+        debugPrint('Skipped corrupt book entry: $error');
+      }
+    }
+    return books;
   }
 
-  /// Checks for a duplicate whose removal has not finished.
-  /// 检查是否有尚未完成删除的重复书籍。
+  /// Checks for a duplicate whose undo window has not closed.
+  /// 检查是否有尚未过撤销期的重复书籍。
   bool hasPendingDeletionFor(String originalName, int fileSize) =>
-      [..._pendingDeletion, ..._finalizingDeletion].any(
+      _pendingDeletion.any(
         (book) =>
             book.originalName == originalName && book.fileSize == fileSize,
       );
@@ -310,6 +346,24 @@ class LibraryRepository extends ChangeNotifier {
   /// Imports a local file. OS open requests can reuse a byte-identical book.
   /// 导入本地文件。通过系统打开时，可以复用内容完全一致的书籍。
   Future<ComicBook> importFile(
+    String sourcePath, {
+    String? originalName,
+    String? folderId,
+    ImportProgressCallback? onProgress,
+    PdfPasswordProvider? pdfPasswordProvider,
+    bool reuseIdenticalBook = false,
+  }) => _withStorageOperation(
+    () => _importFile(
+      sourcePath,
+      originalName: originalName,
+      folderId: folderId,
+      onProgress: onProgress,
+      pdfPasswordProvider: pdfPasswordProvider,
+      reuseIdenticalBook: reuseIdenticalBook,
+    ),
+  );
+
+  Future<ComicBook> _importFile(
     String sourcePath, {
     String? originalName,
     String? folderId,
@@ -382,12 +436,30 @@ class LibraryRepository extends ChangeNotifier {
     String? folderId,
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
+  }) => _withStorageOperation(
+    () => _importStream(
+      originalName: originalName,
+      stream: stream,
+      totalSize: totalSize,
+      folderId: folderId,
+      onProgress: onProgress,
+      pdfPasswordProvider: pdfPasswordProvider,
+    ),
+  );
+
+  Future<ComicBook> _importStream({
+    required String originalName,
+    required Stream<List<int>> stream,
+    int? totalSize,
+    String? folderId,
+    ImportProgressCallback? onProgress,
+    PdfPasswordProvider? pdfPasswordProvider,
   }) async {
     final format = ComicFormat.fromExtension(p.extension(originalName));
     if (format == null) {
       throw ImportException('仅支持 PDF、MOBI、CBZ 格式');
     }
-    if (totalSize != null) {
+    if (totalSize != null && totalSize > 0) {
       _checkDuplicate(originalName, totalSize);
     }
 
@@ -402,12 +474,18 @@ class LibraryRepository extends ChangeNotifier {
     try {
       final sink = part.openWrite();
       var copied = 0;
+      var unflushed = 0;
       var lastReport = 0;
       final stopwatch = Stopwatch()..start();
       try {
         await for (final chunk in stream) {
           sink.add(chunk);
           copied += chunk.length;
+          unflushed += chunk.length;
+          if (unflushed >= 1024 * 1024) {
+            unflushed = 0;
+            await sink.flush();
+          }
           if (stopwatch.elapsedMilliseconds - lastReport > 120) {
             lastReport = stopwatch.elapsedMilliseconds;
             final fraction = totalSize != null && totalSize > 0
@@ -419,8 +497,9 @@ class LibraryRepository extends ChangeNotifier {
       } finally {
         await sink.close();
       }
-      if (totalSize == null) {
-        _checkDuplicate(originalName, await part.length());
+      final actualSize = await part.length();
+      if (totalSize == null || totalSize <= 0 || actualSize != totalSize) {
+        _checkDuplicate(originalName, actualSize);
       }
       await part.rename(destination.path);
 
@@ -449,15 +528,15 @@ class LibraryRepository extends ChangeNotifier {
     Directory directory, {
     String? folderId,
     ImportProgressCallback? onProgress,
-  }) {
-    return _importAlbum(
+  }) => _withStorageOperation(
+    () => _importAlbum(
       store: FileAlbumStore(directory.path),
       source: directory.path,
       name: p.basename(directory.path),
       folderId: folderId,
       onProgress: onProgress,
-    );
-  }
+    ),
+  );
 
   /// Adds an Android SAF image folder as a referenced album.
   /// 将 Android SAF 图片文件夹作为引用型相册加入书架。
@@ -487,6 +566,7 @@ class LibraryRepository extends ChangeNotifier {
   }) async {
     File? coverFile;
     try {
+      _checkDuplicateAlbum(source);
       onProgress?.call('正在扫描相册', 0.15);
       final images = await store.list();
       if (images.isEmpty) {
@@ -494,7 +574,6 @@ class LibraryRepository extends ChangeNotifier {
       }
       final totalSize = images.fold<int>(0, (sum, image) => sum + image.size);
       final title = name.trim().isEmpty ? '图片相册' : name.trim();
-      _checkDuplicate(title, totalSize);
 
       onProgress?.call('正在生成封面', 0.7);
       final id = _newId();
@@ -525,8 +604,8 @@ class LibraryRepository extends ChangeNotifier {
       _books.add(book);
       _index.upsert(book);
       _sortBooks();
-      notifyListeners();
       await _saveNow(durable: true);
+      if (!_disposed) notifyListeners();
       onProgress?.call('导入完成', 1);
       return book;
     } on ImportException {
@@ -581,7 +660,7 @@ class LibraryRepository extends ChangeNotifier {
       _books.insert(0, book);
       _index.upsert(book);
       await _saveNow(durable: true);
-      notifyListeners();
+      if (!_disposed) notifyListeners();
       onProgress?.call('导入完成', 1);
       return book;
     } catch (error) {
@@ -689,6 +768,20 @@ class LibraryRepository extends ChangeNotifier {
     String sourcePath, {
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
+  }) => _withStorageOperation(
+    () => _relinkFile(
+      book,
+      sourcePath,
+      onProgress: onProgress,
+      pdfPasswordProvider: pdfPasswordProvider,
+    ),
+  );
+
+  Future<ComicBook> _relinkFile(
+    ComicBook book,
+    String sourcePath, {
+    ImportProgressCallback? onProgress,
+    PdfPasswordProvider? pdfPasswordProvider,
   }) async {
     final source = File(sourcePath);
     if (!await source.exists()) {
@@ -709,6 +802,14 @@ class LibraryRepository extends ChangeNotifier {
     final part = File('${destination.path}.part');
     final coverId = '${book.id}_c$stamp';
     String? newCoverPath;
+    final oldPath = book.filePath;
+    final oldPageCount = book.pageCount;
+    final oldFileSize = book.fileSize;
+    final oldCover = book.coverPath;
+    final oldCustomCover = book.customCover;
+    final oldLastPage = book.lastPage;
+    final oldBookmarks = List<Bookmark>.of(book.bookmarks);
+    var saved = false;
     try {
       await _copyWithProgress(
         source,
@@ -717,6 +818,7 @@ class LibraryRepository extends ChangeNotifier {
             onProgress?.call('正在复制 ${p.basename(sourcePath)}', value * 0.7),
       );
       await part.rename(destination.path);
+      final newFileSize = await destination.length();
       final info = await _inspectComic(
         file: destination,
         format: book.format,
@@ -728,32 +830,49 @@ class LibraryRepository extends ChangeNotifier {
       );
       newCoverPath = info.coverPath;
 
-      final oldFile = File(book.filePath);
-      final oldCover = book.coverPath;
+      final oldFile = File(oldPath);
       book.filePath = destination.path;
       book.pageCount = info.pageCount;
-      book.fileSize = await destination.length();
+      book.fileSize = newFileSize;
       book.coverPath = newCoverPath;
       book.customCover = false;
       book.lastPage = _clampPage(book.lastPage, book.pageCount);
       book.bookmarks.removeWhere(
         (bookmark) => bookmark.page < 0 || bookmark.page >= book.pageCount,
       );
-      await _saveNow(durable: true);
+      saved = await _saveNow(durable: true);
+      if (!saved) {
+        throw ImportException('无法保存更新后的书架记录');
+      }
       await PdfPasswordStore.forget(book, filePath: oldFile.path);
-      notifyListeners();
-      await _deleteQuietly(oldFile);
-      if (oldCover != null && oldCover != newCoverPath) {
+      if (!_disposed) notifyListeners();
+      if (_pathKey(oldFile.path) != _pathKey(destination.path)) {
+        await _deleteQuietly(oldFile);
+      }
+      if (oldCover != null &&
+          oldCover != newCoverPath &&
+          !_isCoverReferencedElsewhere(oldCover, book)) {
         await _deleteQuietly(File(oldCover));
       }
       onProgress?.call('重新定位完成', 1);
       return book;
     } catch (error, stack) {
       debugPrint('Relink failed: $error\n$stack');
-      await _deleteQuietly(part);
-      await _deleteQuietly(destination);
-      await _deleteQuietly(File(p.join(paths.coversDir.path, '$coverId.png')));
-      if (newCoverPath != null) await _deleteQuietly(File(newCoverPath));
+      if (!saved) {
+        book.filePath = oldPath;
+        book.pageCount = oldPageCount;
+        book.fileSize = oldFileSize;
+        book.coverPath = oldCover;
+        book.customCover = oldCustomCover;
+        book.lastPage = oldLastPage;
+        book.bookmarks
+          ..clear()
+          ..addAll(oldBookmarks);
+        await _deleteQuietly(part);
+        await _deleteQuietly(destination);
+        await _deleteQuietly(File(p.join(paths.coversDir.path, '$coverId.png')));
+        if (newCoverPath != null) await _deleteQuietly(File(newCoverPath));
+      }
       if (error is ImportException) rethrow;
       if (error is ZipArchiveException) throw ImportException(error.message);
       if (error is MobiException) throw ImportException(error.message);
@@ -767,9 +886,11 @@ class LibraryRepository extends ChangeNotifier {
     ComicBook book, {
     required String source,
     ImportProgressCallback? onProgress,
-  }) => _withStorageOperation(() => _relinkAlbum(book, source, onProgress));
+  }) => _withStorageOperation(
+    () async => (await _relinkAlbum(book, source, onProgress)).$1,
+  );
 
-  Future<ComicBook> _relinkAlbum(
+  Future<(ComicBook, bool)> _relinkAlbum(
     ComicBook book,
     String source,
     ImportProgressCallback? onProgress,
@@ -809,17 +930,18 @@ class LibraryRepository extends ChangeNotifier {
         book.customCover = false;
       }
       await _saveNow(durable: true);
-      notifyListeners();
+      if (!_disposed) notifyListeners();
       if (oldCover != null &&
           newCoverPath != null &&
-          oldCover != newCoverPath) {
+          oldCover != newCoverPath &&
+          !_isCoverReferencedElsewhere(oldCover, book)) {
         await _deleteQuietly(File(oldCover));
       }
       if (oldPath != source && oldPath.startsWith('content://')) {
         await _releaseAlbumTreeIfUnused(oldPath);
       }
       onProgress?.call('重新定位完成', 1);
-      return book;
+      return (book, newCoverPath != null);
     } on ImportException {
       rethrow;
     } on AlbumSourceException catch (error) {
@@ -838,11 +960,23 @@ class LibraryRepository extends ChangeNotifier {
     ComicBook book, {
     ImportProgressCallback? onProgress,
     PdfPasswordProvider? pdfPasswordProvider,
+  }) => _withStorageOperation(
+    () => _regenerateCover(
+      book,
+      onProgress: onProgress,
+      pdfPasswordProvider: pdfPasswordProvider,
+    ),
+  );
+
+  Future<bool> _regenerateCover(
+    ComicBook book, {
+    ImportProgressCallback? onProgress,
+    PdfPasswordProvider? pdfPasswordProvider,
   }) async {
     if (book.format.isAlbum) {
       try {
-        await relinkAlbum(book, source: book.filePath, onProgress: onProgress);
-        return true;
+        final (_, updated) = await _relinkAlbum(book, book.filePath, onProgress);
+        return updated;
       } catch (_) {
         return false;
       }
@@ -877,8 +1011,10 @@ class LibraryRepository extends ChangeNotifier {
         );
       }
       await _saveNow(durable: true);
-      notifyListeners();
-      if (oldCover != null && oldCover != newCoverPath) {
+      if (!_disposed) notifyListeners();
+      if (oldCover != null &&
+          oldCover != newCoverPath &&
+          !_isCoverReferencedElsewhere(oldCover, book)) {
         await _deleteQuietly(File(oldCover));
       }
       return true;
@@ -892,7 +1028,10 @@ class LibraryRepository extends ChangeNotifier {
 
   /// Replaces the cover with a user-picked image, normalised to a 520px PNG.
   /// 用用户选择的图片替换封面，并规范化为 520px PNG。
-  Future<bool> setCustomCover(ComicBook book, Uint8List bytes) async {
+  Future<bool> setCustomCover(ComicBook book, Uint8List bytes) =>
+      _withStorageOperation(() => _setCustomCover(book, bytes));
+
+  Future<bool> _setCustomCover(ComicBook book, Uint8List bytes) async {
     if (bytes.isEmpty) return false;
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final cover = File(p.join(paths.coversDir.path, '${book.id}_u$stamp.png'));
@@ -905,8 +1044,10 @@ class LibraryRepository extends ChangeNotifier {
     book.coverPath = newPath;
     book.customCover = true;
     await _saveNow(durable: true);
-    notifyListeners();
-    if (oldCover != null && oldCover != newPath) {
+    if (!_disposed) notifyListeners();
+    if (oldCover != null &&
+        oldCover != newPath &&
+        !_isCoverReferencedElsewhere(oldCover, book)) {
       await _deleteQuietly(File(oldCover));
     }
     return true;
@@ -960,6 +1101,9 @@ class LibraryRepository extends ChangeNotifier {
   Future<int> cleanupStorage() => _withStorageOperation(_cleanupStorage);
 
   Future<int> _cleanupStorage() async {
+    if (_finalizingDeletion.isNotEmpty) {
+      await _finishDeletionInternal();
+    }
     final retained = _retainedBooks.toList();
     final bookPaths = {for (final book in retained) _pathKey(book.filePath)};
     final coverPaths = {
@@ -1057,37 +1201,97 @@ class LibraryRepository extends ChangeNotifier {
     }
   }
 
-  /// Restores a JSON manifest or a ZIP backup. Existing books are kept and
-  /// duplicates are skipped; statistics are merged by per-day maxima.
-  /// 恢复 JSON 清单或 ZIP 备份。保留已有书籍并跳过重复项；统计按每日最大值合并。
+  /// Restores a JSON manifest or a ZIP backup from bytes. Existing books are
+  /// kept and duplicates are skipped; statistics are merged by per-day maxima.
+  /// 从字节数组恢复 JSON 清单或 ZIP 备份。保留已有书籍并跳过重复项；
+  /// 统计按每日最大值合并。
   Future<BackupImportResult> restoreBackupBytes(
     Uint8List bytes, {
     ImportProgressCallback? onProgress,
-  }) => _withStorageOperation(() => _restoreBackupBytes(bytes, onProgress));
+  }) => _withStorageOperation(
+    () => _restoreBackupFromSource(bytes: bytes, onProgress: onProgress),
+  );
 
-  Future<BackupImportResult> _restoreBackupBytes(
-    Uint8List bytes,
+  /// Restores a JSON manifest or a `.mrbackup` ZIP archive directly from [file]
+  /// without reading the entire archive into memory at once.
+  /// 直接从本地文件流式恢复 JSON 或 `.mrbackup` 备份，避免将整包一次性读入内存。
+  Future<BackupImportResult> restoreBackupFile(
+    File file, {
     ImportProgressCallback? onProgress,
-  ) async {
+  }) => _withStorageOperation(
+    () => _restoreBackupFromSource(file: file, onProgress: onProgress),
+  );
+
+  Future<BackupImportResult> _restoreBackupFromSource({
+    Uint8List? bytes,
+    File? file,
+    ImportProgressCallback? onProgress,
+  }) async {
+    InputFileStream? fileInput;
     Archive? archive;
     Map<String, Object?> manifest;
     try {
-      if (_looksLikeZip(bytes)) {
-        archive = ZipDecoder().decodeBytes(bytes);
-        final entry = archive.findFile('manifest.json');
-        if (entry == null) {
-          throw ImportException('备份压缩包缺少 manifest.json');
+      if (file != null) {
+        if (!await file.exists()) {
+          throw ImportException('备份文件不存在');
         }
-        manifest = _decodeBackupManifest(entry.readBytes() ?? Uint8List(0));
+        final header = await _readFileHeader(file, 4);
+        if (_looksLikeZip(header)) {
+          fileInput = InputFileStream(file.path);
+          archive = ZipDecoder().decodeStream(fileInput);
+          final entry = archive.findFile('manifest.json');
+          if (entry == null) {
+            throw ImportException('备份压缩包缺少 manifest.json');
+          }
+          manifest = _decodeBackupManifest(entry.readBytes() ?? Uint8List(0));
+        } else {
+          final size = await file.length();
+          if (size > 64 * 1024 * 1024) {
+            throw ImportException('JSON 备份文件过大，无法读取');
+          }
+          manifest = _decodeBackupManifest(await file.readAsBytes());
+        }
       } else {
-        manifest = _decodeBackupManifest(bytes);
+        final data = bytes ?? Uint8List(0);
+        if (_looksLikeZip(data)) {
+          archive = ZipDecoder().decodeBytes(data);
+          final entry = archive.findFile('manifest.json');
+          if (entry == null) {
+            throw ImportException('备份压缩包缺少 manifest.json');
+          }
+          manifest = _decodeBackupManifest(entry.readBytes() ?? Uint8List(0));
+        } else {
+          manifest = _decodeBackupManifest(data);
+        }
       }
+      return await _applyBackupManifest(
+        manifest: manifest,
+        archive: archive,
+        onProgress: onProgress,
+      );
     } on ImportException {
       rethrow;
     } catch (error) {
       throw ImportException('无法读取备份：$error');
+    } finally {
+      await fileInput?.close();
     }
+  }
 
+  Future<Uint8List> _readFileHeader(File file, int count) async {
+    final raf = await file.open();
+    try {
+      return await raf.read(count);
+    } finally {
+      await raf.close();
+    }
+  }
+
+  Future<BackupImportResult> _applyBackupManifest({
+    required Map<String, Object?> manifest,
+    required Archive? archive,
+    required ImportProgressCallback? onProgress,
+  }) async {
     if (manifest['format'] != backupFormat) {
       throw ImportException('这不是漫阅书架备份文件');
     }
@@ -1137,19 +1341,38 @@ class LibraryRepository extends ChangeNotifier {
       final map = raw.map((key, value) => MapEntry('$key', value));
       final title = '${map['title'] ?? '未命名'}';
       try {
-        final formatName = '${map['format'] ?? ''}';
-        final format = ComicFormat.fromName(formatName);
+        final rawFormatName = (map['format'] is String
+                ? map['format'] as String
+                : '')
+            .trim();
         final declaredSize = (map['fileSize'] as num?)?.toInt() ?? 0;
-        final originalName = '${map['originalName'] ?? ''}';
-        final extension = _storageExtension(originalName, format);
-        var id = '${map['id'] ?? ''}';
+        final originalName = map['originalName'] is String
+            ? map['originalName'] as String
+            : '';
         final relativePath = _safeArchivePath(map['filePath']);
         final relativeCover = _safeArchivePath(map['coverPath']);
+        final inferredFormat = rawFormatName.isNotEmpty &&
+                ComicFormat.values.any((value) => value.name == rawFormatName)
+            ? ComicFormat.fromName(rawFormatName)
+            : (ComicFormat.fromExtension(
+                    p.extension(
+                      originalName.isNotEmpty ? originalName : relativePath,
+                    ),
+                  ) ??
+                  ComicFormat.pdf);
+        final extension = _storageExtension(
+          originalName.isNotEmpty ? originalName : relativePath,
+          inferredFormat,
+        );
+        final id = _sanitizeArchiveId(map['id']) ?? _newId();
 
-        if (id.isEmpty) id = _newId();
-        final duplicate = _retainedBooks.any(
+        final duplicate = _activeBooks.any(
           (book) =>
               book.id == id ||
+              (inferredFormat.isAlbum &&
+                  book.format.isAlbum &&
+                  _albumSourceKey(book.filePath) ==
+                      _albumSourceKey('${map['filePath'] ?? ''}')) ||
               (originalName.isNotEmpty &&
                   book.originalName == originalName &&
                   book.fileSize == declaredSize),
@@ -1159,7 +1382,7 @@ class LibraryRepository extends ChangeNotifier {
           continue;
         }
 
-        if (format.isAlbum) {
+        if (inferredFormat.isAlbum) {
           final source = '${map['filePath'] ?? ''}'.trim();
           if (source.isEmpty) throw ImportException('相册缺少源路径');
           String? coverPath;
@@ -1176,9 +1399,17 @@ class LibraryRepository extends ChangeNotifier {
             final existingCover = File(
               p.join(paths.coversDir.path, p.basename(relativeCover)),
             );
-            if (await existingCover.exists()) coverPath = existingCover.path;
+            if (await existingCover.exists() &&
+                !_retainedBooks.any(
+                  (book) =>
+                      book.coverPath != null &&
+                      _pathKey(book.coverPath!) == _pathKey(existingCover.path),
+                )) {
+              coverPath = existingCover.path;
+            }
           }
           map['id'] = id;
+          map['format'] = inferredFormat.name;
           map['filePath'] = source;
           map['coverPath'] = coverPath;
           map['folderId'] = folderIdMap['${map['folderId'] ?? ''}'];
@@ -1190,6 +1421,9 @@ class LibraryRepository extends ChangeNotifier {
           continue;
         }
 
+        final archiveEntry = relativePath.isEmpty
+            ? null
+            : archive?.findFile(relativePath);
         var destination = File(
           p.join(
             paths.booksDir.path,
@@ -1198,14 +1432,13 @@ class LibraryRepository extends ChangeNotifier {
                 : '$id.$extension',
           ),
         );
-        if (await destination.exists()) {
-          id = _newId();
-          destination = File(p.join(paths.booksDir.path, '$id.$extension'));
+        if (archiveEntry != null && await destination.exists()) {
+          final stamp = DateTime.now().microsecondsSinceEpoch;
+          destination = File(
+            p.join(paths.booksDir.path, '${id}_b$stamp.$extension'),
+          );
         }
 
-        final archiveEntry = relativePath.isEmpty
-            ? null
-            : archive?.findFile(relativePath);
         var hasFile = await destination.exists();
         if (archiveEntry != null) {
           await _writeArchiveEntry(archiveEntry, destination);
@@ -1226,11 +1459,19 @@ class LibraryRepository extends ChangeNotifier {
           final existingCover = File(
             p.join(paths.coversDir.path, p.basename(relativeCover)),
           );
-          if (await existingCover.exists()) coverPath = existingCover.path;
+          if (await existingCover.exists() &&
+              !_retainedBooks.any(
+                (book) =>
+                    book.coverPath != null &&
+                    _pathKey(book.coverPath!) == _pathKey(existingCover.path),
+              )) {
+            coverPath = existingCover.path;
+          }
         }
 
         map['id'] = id;
-        map['filePath'] = destination.path;
+        map['format'] = inferredFormat.name;
+        map['filePath'] = hasFile ? destination.path : '';
         map['coverPath'] = coverPath;
         map['folderId'] = folderIdMap['${map['folderId'] ?? ''}'];
         final book = ComicBook.fromJson(map);
@@ -1267,7 +1508,7 @@ class LibraryRepository extends ChangeNotifier {
     stats.merge(backupStats);
     _sortBooks();
     await _saveNow(durable: true);
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     onProgress?.call('恢复完成', 1);
     return result;
   }
@@ -1341,10 +1582,21 @@ class LibraryRepository extends ChangeNotifier {
     return cover == null ? null : 'covers/${p.basename(cover)}';
   }
 
+  String? _sanitizeArchiveId(Object? value) {
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    if (trimmed.isEmpty || trimmed.length > 64) return null;
+    return RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(trimmed) ? trimmed : null;
+  }
+
   String _safeArchivePath(Object? value) {
     final text = '${value ?? ''}'.replaceAll('\\', '/').trim();
     if (text.isEmpty || text.startsWith('/') || text.contains('..')) return '';
     if (!text.startsWith('books/') && !text.startsWith('covers/')) return '';
+    final segments = text.split('/');
+    if (segments.length != 2) return '';
+    final name = segments[1];
+    if (name.isEmpty || name == '.' || name == '..') return '';
     return text;
   }
 
@@ -1409,8 +1661,20 @@ class LibraryRepository extends ChangeNotifier {
     }
   }
 
+  String _albumSourceKey(String source) =>
+      source.startsWith('content://') ? source : _pathKey(source);
+
+  void _checkDuplicateAlbum(String source) {
+    final key = _albumSourceKey(source);
+    if (_activeBooks.any(
+      (book) => book.format.isAlbum && _albumSourceKey(book.filePath) == key,
+    )) {
+      throw ImportException('这个相册已经在书架里了');
+    }
+  }
+
   void _checkDuplicate(String originalName, int fileSize) {
-    if (_retainedBooks.any(
+    if (_activeBooks.any(
       (book) => book.originalName == originalName && book.fileSize == fileSize,
     )) {
       throw ImportException(
@@ -1419,17 +1683,17 @@ class LibraryRepository extends ChangeNotifier {
     }
   }
 
-  void updateProgress(ComicBook book, int page) {
+  void updateProgress(ComicBook book, int page, {bool notify = true}) {
     final clamped = book.pageCount <= 0 ? 0 : page.clamp(0, book.pageCount - 1);
     final previous = book.safeLastPage;
     final now = DateTime.now();
     if (clamped > previous) {
-      stats.addPages(clamped - previous, now);
+      stats.addPages(clamped - previous, now, bookId: book.id);
     }
     book.lastPage = clamped;
     book.lastReadAt = now;
     _moveToFront(book);
-    notifyListeners();
+    if (notify && !_disposed) notifyListeners();
     _scheduleSave();
   }
 
@@ -1475,12 +1739,36 @@ class LibraryRepository extends ChangeNotifier {
   /// 书籍是否算已读完，即已经读到最后一页。
   static bool isFinished(ComicBook book) => book.isFinished;
 
-  /// Adds reading time in seconds to today's statistics.
-  /// 把阅读时长（秒）计入今天的统计。
-  void addReadingTime(int seconds) {
+  /// Adds reading time in seconds to today's statistics, optionally attributed
+  /// to [book].
+  /// 把阅读时长（秒）计入今天的统计，并可归属到指定漫画 [book]。
+  void addReadingTime(int seconds, {ComicBook? book, bool notify = true}) {
     if (seconds <= 0) return;
-    stats.addSeconds(seconds, DateTime.now());
+    stats.addSeconds(
+      seconds,
+      DateTime.now(),
+      bookId: book?.id,
+      bookTitle: book?.title,
+    );
+    if (notify) notifyListeners();
     _scheduleSave();
+  }
+
+  /// Sets the optional daily reading goal in minutes (`0` disables it).
+  /// 设置每日阅读时长目标（分钟），`0` 表示关闭目标。
+  void setDailyReadingGoalMinutes(int minutes) {
+    final next = minutes.clamp(0, ReadingStats.maxDailyGoalMinutes);
+    if (stats.dailyGoalMinutes == next) return;
+    stats.dailyGoalMinutes = next;
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  /// Notifies listeners after a reader route finishes disposing.
+  /// 阅读器页面销毁后通知监听方刷新今日阅读统计。
+  void notifyReadingSessionEnded() {
+    if (_disposed) return;
+    notifyListeners();
   }
 
   bool isBookmarked(ComicBook book, int page) => book.isBookmarked(page);
@@ -1715,7 +2003,9 @@ class LibraryRepository extends ChangeNotifier {
     if (_finalizingDeletion.isNotEmpty) await _finishDeletion();
   }
 
-  Future<void> _finishDeletion() => _withStorageOperation(() async {
+  Future<void> _finishDeletion() => _withStorageOperation(_finishDeletionInternal);
+
+  Future<void> _finishDeletionInternal() async {
     if (_finalizingDeletion.isEmpty) return;
     final targets = _finalizingDeletion.toSet();
     // Record the irreversible transition before touching files or permissions.
@@ -1754,7 +2044,7 @@ class LibraryRepository extends ChangeNotifier {
       if (removed) _finalizingDeletion.remove(book);
     }
     await _saveNow(durable: true);
-  });
+  }
 
   Future<bool> _removeManagedFile(String path, Directory directory) async {
     if (_pathKey(p.dirname(path)) != _pathKey(directory.path)) return true;
@@ -2137,10 +2427,11 @@ class LibraryRepository extends ChangeNotifier {
   }
 
   void _scheduleSave() {
+    if (_disposed) return;
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 450), () {
       _saveTimer = null;
-      unawaited(_saveNow());
+      if (!_disposed) unawaited(_saveNow());
     });
   }
 
@@ -2183,7 +2474,9 @@ class LibraryRepository extends ChangeNotifier {
         temp.renameSync(paths.libraryFile.path);
       } on FileSystemException {
         paths.libraryFile.writeAsStringSync(payload, flush: durable);
-        unawaited(_deleteQuietly(temp));
+        try {
+          if (temp.existsSync()) temp.deleteSync();
+        } catch (_) {}
       }
       return true;
     } catch (error, stack) {
@@ -2200,12 +2493,18 @@ class LibraryRepository extends ChangeNotifier {
     final total = await source.length();
     final sink = destination.openWrite();
     var copied = 0;
+    var unflushed = 0;
     var lastReport = 0;
     final stopwatch = Stopwatch()..start();
     try {
       await for (final chunk in source.openRead()) {
         sink.add(chunk);
         copied += chunk.length;
+        unflushed += chunk.length;
+        if (unflushed >= 1024 * 1024) {
+          unflushed = 0;
+          await sink.flush();
+        }
         if (total > 0 &&
             (stopwatch.elapsedMilliseconds - lastReport > 120 ||
                 copied == total)) {

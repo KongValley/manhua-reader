@@ -132,12 +132,18 @@ void main() {
     expect(find.text('阅读方式会按书记住'), findsOneWidget);
     expect(find.text('改回跟随全局'), findsNothing);
   });
+
+  testWidgets('hides double-page mode for single-page comics', (tester) async {
+    await _pump(tester, canDoublePage: false);
+    expect(find.text('双页模式'), findsNothing);
+  });
 }
 
 Future<void> _pump(
   WidgetTester tester, {
   bool isAndroid = false,
   bool hasBookPrefs = false,
+  bool canDoublePage = true,
   ValueChanged<ReadingMode>? onModeChanged,
   ValueChanged<bool>? onRightToLeftChanged,
   ValueChanged<bool>? onDoublePageChanged,
@@ -163,6 +169,7 @@ Future<void> _pump(
           mode: ReadingMode.horizontal,
           rightToLeft: false,
           doublePage: false,
+          canDoublePage: canDoublePage,
           keepAwake: true,
           brightness: 1,
           warmth: 0,

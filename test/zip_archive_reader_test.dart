@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -216,6 +217,188 @@ void main() {
       ),
     );
   });
+
+  test('reads WebP VP8L > 1024px, BMP BITMAPCOREHEADER, and EXIF orientation', () {
+    // WebP VP8L: 1200 x 2500 -> (1199) | (2499 << 14).
+    const w = 1200;
+    const h = 2500;
+    final packed = (w - 1) | ((h - 1) << 14);
+    final vp8l = Uint8List(25)
+      ..setAll(0, ascii.encode('RIFF'))
+      ..setAll(8, ascii.encode('WEBP'))
+      ..setAll(12, ascii.encode('VP8L'))
+      ..[20] = 0x2F
+      ..[21] = packed & 0xFF
+      ..[22] = (packed >> 8) & 0xFF
+      ..[23] = (packed >> 16) & 0xFF
+      ..[24] = (packed >> 24) & 0xFF;
+    expect(readImageDimensions(vp8l), (width: 1200, height: 2500));
+
+    // BMP BITMAPCOREHEADER (dibSize == 12): 16-bit LE width=640, height=480.
+    final coreBmp = Uint8List(26)..setAll(0, ascii.encode('BM'));
+    final coreBd = ByteData.sublistView(coreBmp);
+    coreBd.setUint32(14, 12, Endian.little);
+    coreBd.setUint16(18, 640, Endian.little);
+    coreBd.setUint16(20, 480, Endian.little);
+    expect(readImageDimensions(coreBmp), (width: 640, height: 480));
+
+    // JPEG 120x180 with EXIF APP1 Orientation = 6 (90° CW -> swaps to 180x120).
+    final baseJpeg = _jpeg(120, 180);
+    final exifJpeg = _withExifOrientation(baseJpeg, 6);
+    expect(readImageDimensions(exifJpeg), (width: 180, height: 120));
+  });
+
+  test('accounts cache properly on concurrent reads, guards ZIP64 bounds and zip bombs', () async {
+    final p1 = _jpeg(100, 120);
+    final p2 = _jpeg(110, 130);
+    final archive = Archive()
+      ..add(_file('001.jpg', p1))
+      ..add(_file('002.jpg', p2));
+    final path = await _write(temp, 'concurrent.cbz', _zipBytes(archive));
+    final reader = await ZipArchiveReader.open(path);
+    try {
+      final concurrent = await Future.wait([
+        reader.readPageBytes(0),
+        reader.readPageBytes(0),
+        reader.readPageBytes(1),
+      ]);
+      expect(concurrent[0], same(concurrent[1]));
+      expect(concurrent[2], p2);
+    } finally {
+      await reader.dispose();
+    }
+
+    // Malformed ZIP64 extra field claiming a larger block than available bytes.
+    final zip64BadExtra = Uint8List.fromList([
+      0x01, 0x00, // ZIP64 tag
+      0x18, 0x00, // 24-byte block size, but only 8 bytes remain
+      0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    final badZip64Path = await _write(
+      temp,
+      'bad64.cbz',
+      _craftSingleEntryZip(
+        'page.jpg',
+        p1,
+        compressionMethod: 0,
+        uncompressedSize: 0xFFFFFFFF,
+        cdExtra: zip64BadExtra,
+      ),
+    );
+    final bad64Reader = await ZipArchiveReader.open(badZip64Path);
+    try {
+      // Truncated ZIP64 extra field must not cause RangeError; reading still works cleanly.
+      expect(await bad64Reader.readPageBytes(0), p1);
+    } finally {
+      await bad64Reader.dispose();
+    }
+
+    // Deflate zip bomb expanding beyond 64 MB limit aborts early.
+    final bombRaw = Uint8List.fromList(
+      ZLibCodec(raw: true).encode(Uint8List(65 * 1024 * 1024)),
+    );
+    final bombPath = await _write(
+      temp,
+      'bomb.cbz',
+      _craftSingleEntryZip(
+        'bomb.jpg',
+        bombRaw,
+        compressionMethod: 8,
+        uncompressedSize: 512,
+      ),
+    );
+    final bombReader = await ZipArchiveReader.open(bombPath);
+    try {
+      await expectLater(
+        bombReader.readPageBytes(0),
+        throwsA(isA<ZipArchiveException>()),
+      );
+    } finally {
+      await bombReader.dispose();
+    }
+  });
+}
+
+Uint8List _withExifOrientation(Uint8List jpeg, int orientation) {
+  // TIFF header ('II' LE, 0x002A, IFD0 offset=8) + 1 entry (0x0112 SHORT 1 orientation).
+  final tiff = Uint8List(26);
+  tiff.setAll(0, ascii.encode('II'));
+  final tbd = ByteData.sublistView(tiff);
+  tbd.setUint16(2, 42, Endian.little);
+  tbd.setUint32(4, 8, Endian.little);
+  tbd.setUint16(8, 1, Endian.little); // 1 directory entry
+  tbd.setUint16(10, 0x0112, Endian.little); // Orientation tag
+  tbd.setUint16(12, 3, Endian.little); // SHORT
+  tbd.setUint32(14, 1, Endian.little);
+  tbd.setUint16(18, orientation, Endian.little);
+
+  final payload = BytesBuilder()
+    ..add(ascii.encode('Exif'))
+    ..add([0, 0])
+    ..add(tiff);
+  final app1Data = payload.toBytes();
+  final app1 = BytesBuilder()
+    ..add([0xFF, 0xE1])
+    ..add([
+      ((app1Data.length + 2) >> 8) & 0xFF,
+      (app1Data.length + 2) & 0xFF,
+    ])
+    ..add(app1Data);
+
+  final out = BytesBuilder()
+    ..add(jpeg.sublist(0, 2))
+    ..add(app1.toBytes())
+    ..add(jpeg.sublist(2));
+  return Uint8List.fromList(out.toBytes());
+}
+
+Uint8List _craftSingleEntryZip(
+  String name,
+  Uint8List payload, {
+  required int compressionMethod,
+  required int uncompressedSize,
+  Uint8List? cdExtra,
+}) {
+  final nameBytes = utf8.encode(name);
+  final extra = cdExtra ?? Uint8List(0);
+  final lfh = Uint8List(30 + nameBytes.length);
+  final lbd = ByteData.sublistView(lfh);
+  lbd.setUint32(0, 0x04034B50, Endian.little);
+  lbd.setUint16(4, 20, Endian.little);
+  lbd.setUint16(8, compressionMethod, Endian.little);
+  lbd.setUint32(18, payload.length, Endian.little);
+  lbd.setUint32(22, uncompressedSize, Endian.little);
+  lbd.setUint16(26, nameBytes.length, Endian.little);
+  lfh.setAll(30, nameBytes);
+
+  final cdOffset = lfh.length + payload.length;
+  final cdh = Uint8List(46 + nameBytes.length + extra.length);
+  final cbd = ByteData.sublistView(cdh);
+  cbd.setUint32(0, 0x02014B50, Endian.little);
+  cbd.setUint16(4, 20, Endian.little);
+  cbd.setUint16(6, 20, Endian.little);
+  cbd.setUint16(10, compressionMethod, Endian.little);
+  cbd.setUint32(20, payload.length, Endian.little);
+  cbd.setUint32(24, uncompressedSize, Endian.little);
+  cbd.setUint16(28, nameBytes.length, Endian.little);
+  cbd.setUint16(30, extra.length, Endian.little);
+  cdh.setAll(46, nameBytes);
+  cdh.setAll(46 + nameBytes.length, extra);
+
+  final eocd = Uint8List(22);
+  final ebd = ByteData.sublistView(eocd);
+  ebd.setUint32(0, 0x06054B50, Endian.little);
+  ebd.setUint16(8, 1, Endian.little);
+  ebd.setUint16(10, 1, Endian.little);
+  ebd.setUint32(12, cdh.length, Endian.little);
+  ebd.setUint32(16, cdOffset, Endian.little);
+
+  return Uint8List.fromList([
+    ...lfh,
+    ...payload,
+    ...cdh,
+    ...eocd,
+  ]);
 }
 
 ArchiveFile _file(String name, Uint8List bytes, {bool store = false}) {

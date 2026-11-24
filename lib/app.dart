@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
@@ -25,9 +26,26 @@ class ManhuaApp extends StatefulWidget {
 
 class _ManhuaAppState extends State<ManhuaApp> {
   final _externalRoutes = ExternalOpenNavigatorObserver();
+  late final AppLifecycleListener _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onInactive: _flushLibrary,
+      onHide: _flushLibrary,
+      onPause: _flushLibrary,
+      onDetach: _flushLibrary,
+    );
+  }
+
+  void _flushLibrary() {
+    unawaited(widget.repository.flush());
+  }
 
   @override
   void dispose() {
+    _lifecycle.dispose();
     _externalRoutes.dispose();
     super.dispose();
   }

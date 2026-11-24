@@ -103,6 +103,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       }
       if (status == 0) exit_code = EXIT_SUCCESS;
     }
+    // Window has destroyed/closed; release the single-instance mutex before
+    // teardown finishes so a relaunch does not stall trying to forward to it.
+    // 窗口已退出消息循环并关闭，在后续析构之前释放单实例互斥量，避免立即重启时
+    // 因尝试向已销毁窗口转发而卡住。
+    instance_handle.reset();
   }
   if (SUCCEEDED(com_status)) CoUninitialize();
   return exit_code;

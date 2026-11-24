@@ -61,4 +61,20 @@ class SafFolderService {
       'name': file.name,
     });
   }
+
+  /// Opens Android's document-creation picker and streams [sourcePath] directly
+  /// to the chosen `content://` URI without loading the file into memory.
+  /// 调用 Android 系统保存选择器，并将 [sourcePath] 流式写入目标 URI，避免整包读入内存。
+  static Future<bool> saveFileFromPath({
+    required String sourcePath,
+    required String fileName,
+    String mimeType = 'application/octet-stream',
+  }) async {
+    final saved = await _channel.invokeMethod<bool>('saveFileFromPath', {
+      'sourcePath': sourcePath,
+      'fileName': fileName,
+      'mimeType': mimeType,
+    });
+    return saved == true;
+  }
 }

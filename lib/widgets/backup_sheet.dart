@@ -1,9 +1,12 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import '../services/library_repository.dart';
+import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 
@@ -52,6 +55,8 @@ class _BackupSheetState extends State<BackupSheet> {
 
   Future<void> _exportJson() async {
     if (_busy) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    _start('正在导出书架数据…');
     try {
       final bytes = widget.repository.exportBackupJson();
       final uri = await FilePicker.saveFile(
@@ -60,17 +65,31 @@ class _BackupSheetState extends State<BackupSheet> {
         mimeType: 'application/json',
         dialogTitle: '导出书架数据',
       );
-      if (!mounted) return;
+      if (!mounted) {
+        if (uri != null) {
+          messenger?.showSnackBar(
+            const SnackBar(content: Text('书架数据已导出（不含漫画文件）')),
+          );
+        }
+        return;
+      }
       if (uri != null) {
         _finish(success: '书架数据已导出（不含漫画文件）');
+      } else {
+        _finish();
       }
     } catch (error) {
+      if (!mounted) {
+        messenger?.showSnackBar(SnackBar(content: Text('导出失败：$error')));
+        return;
+      }
       _finish(error: '导出失败：$error');
     }
   }
 
   Future<void> _exportArchive() async {
     if (_busy) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     _start('正在准备完整备份…');
     File? archive;
     try {
@@ -84,23 +103,67 @@ class _BackupSheetState extends State<BackupSheet> {
           }
         },
       );
-      if (!mounted) return;
-      _status = '请选择保存位置…';
-      setState(() {});
-      final bytes = await archive.readAsBytes();
-      final uri = await FilePicker.saveFile(
-        fileName: 'manhua-full-backup-${_stamp()}.mrbackup',
-        bytes: bytes,
-        mimeType: 'application/zip',
-        dialogTitle: '导出完整备份',
-      );
-      if (!mounted) return;
-      if (uri != null) {
-        _finish(success: '完整备份已导出（${formatFileSize(bytes.length)}）');
+      final archiveSize = await archive.length();
+      final fileName = 'manhua-full-backup-${_stamp()}.mrbackup';
+      if (mounted) {
+        setState(() => _status = '请选择保存位置…');
+      }
+
+      var saved = false;
+      if (SafFolderService.isSupported) {
+        saved = await SafFolderService.saveFileFromPath(
+          sourcePath: archive.path,
+          fileName: fileName,
+          mimeType: 'application/zip',
+        );
+      } else if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+        final uri = await FilePicker.saveFile(
+          fileName: fileName,
+          bytes: Uint8List(0),
+          mimeType: 'application/zip',
+          dialogTitle: '导出完整备份',
+        );
+        if (uri != null) {
+          if (uri.scheme == 'file') {
+            await _copyFileStream(archive, File.fromUri(uri));
+            saved = true;
+          } else {
+            final fallback = await FilePicker.saveFile(
+              fileName: fileName,
+              bytes: await archive.readAsBytes(),
+              mimeType: 'application/zip',
+              dialogTitle: '导出完整备份',
+            );
+            saved = fallback != null;
+          }
+        }
+      } else {
+        final uri = await FilePicker.saveFile(
+          fileName: fileName,
+          bytes: await archive.readAsBytes(),
+          mimeType: 'application/zip',
+          dialogTitle: '导出完整备份',
+        );
+        saved = uri != null;
+      }
+
+      final message = '完整备份已导出（${formatFileSize(archiveSize)}）';
+      if (!mounted) {
+        if (saved) {
+          messenger?.showSnackBar(SnackBar(content: Text(message)));
+        }
+        return;
+      }
+      if (saved) {
+        _finish(success: message);
       } else {
         _finish();
       }
     } catch (error) {
+      if (!mounted) {
+        messenger?.showSnackBar(SnackBar(content: Text('备份失败：$error')));
+        return;
+      }
       _finish(error: '备份失败：$error');
     } finally {
       if (archive != null) {
@@ -111,8 +174,27 @@ class _BackupSheetState extends State<BackupSheet> {
     }
   }
 
+  Future<void> _copyFileStream(File source, File destination) async {
+    await destination.parent.create(recursive: true);
+    final sink = destination.openWrite();
+    var unflushed = 0;
+    try {
+      await for (final chunk in source.openRead()) {
+        sink.add(chunk);
+        unflushed += chunk.length;
+        if (unflushed >= 1024 * 1024) {
+          unflushed = 0;
+          await sink.flush();
+        }
+      }
+    } finally {
+      await sink.close();
+    }
+  }
+
   Future<void> _restore() async {
     if (_busy) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     PlatformFile? picked;
     try {
       picked = await FilePicker.pickFile(
@@ -126,11 +208,38 @@ class _BackupSheetState extends State<BackupSheet> {
     if (picked == null || !mounted) return;
 
     _start('正在读取备份…');
+    File? tempFile;
     try {
-      final bytes = await picked.readAsBytes();
-      if (!mounted) return;
-      final result = await widget.repository.restoreBackupBytes(
-        bytes,
+      final File sourceFile;
+      final pickedPath = picked.path;
+      if (pickedPath != null && pickedPath.isNotEmpty) {
+        sourceFile = File(pickedPath);
+      } else {
+        await widget.repository.paths.cacheDir.create(recursive: true);
+        tempFile = File(
+          p.join(
+            widget.repository.paths.cacheDir.path,
+            'restore_${DateTime.now().microsecondsSinceEpoch}.tmp',
+          ),
+        );
+        final sink = tempFile.openWrite();
+        var unflushed = 0;
+        try {
+          await for (final chunk in picked.readAsByteStream()) {
+            sink.add(chunk);
+            unflushed += chunk.length;
+            if (unflushed >= 1024 * 1024) {
+              unflushed = 0;
+              await sink.flush();
+            }
+          }
+        } finally {
+          await sink.close();
+        }
+        sourceFile = tempFile;
+      }
+      final result = await widget.repository.restoreBackupFile(
+        sourceFile,
         onProgress: (label, value) {
           if (mounted) {
             setState(() {
@@ -140,14 +249,34 @@ class _BackupSheetState extends State<BackupSheet> {
           }
         },
       );
-      if (!mounted) return;
+      if (!mounted) {
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text(
+              '备份恢复完成：导入 ${result.imported} 本，跳过 ${result.skipped} 本'
+              '${result.failed > 0 ? '，失败 ${result.failed} 本' : ''}',
+            ),
+          ),
+        );
+        return;
+      }
       setState(() {
         _busy = false;
         _progress = 0;
       });
       await _showRestoreResult(result);
     } catch (error) {
+      if (!mounted) {
+        messenger?.showSnackBar(SnackBar(content: Text('恢复失败：$error')));
+        return;
+      }
       _finish(error: '恢复失败：$error');
+    } finally {
+      if (tempFile != null) {
+        try {
+          if (await tempFile.exists()) await tempFile.delete();
+        } catch (_) {}
+      }
     }
   }
 
@@ -197,8 +326,10 @@ class _BackupSheetState extends State<BackupSheet> {
       0,
       (sum, book) => sum + book.fileSize,
     );
-    return SafeArea(
-      top: false,
+    return PopScope(
+      canPop: !_busy,
+      child: SafeArea(
+        top: false,
       child: Container(
         constraints: BoxConstraints(
           maxHeight: MediaQuery.sizeOf(context).height * 0.86,
@@ -352,6 +483,7 @@ class _BackupSheetState extends State<BackupSheet> {
             ],
           ),
         ),
+      ),
       ),
     );
   }

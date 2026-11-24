@@ -18,11 +18,15 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterActivity() {
     private companion object {
         const val STATE_OPEN_KEY = "manhua.openKey"
+        const val STATE_OPEN_PID = "manhua.openPid"
     }
 
     private val channelName = "manhua/saf"
     private val pickDirectoryRequest = 7281
+    private val createDocumentRequest = 7282
     private var pendingPick: MethodChannel.Result? = null
+    private var pendingSaveResult: MethodChannel.Result? = null
+    private var pendingSaveSourcePath: String? = null
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val externalOpen = ExternalOpen(this, ioExecutor)
     private var readerChannel: MethodChannel? = null
@@ -31,13 +35,20 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handledOpenKey = savedInstanceState?.getString(STATE_OPEN_KEY)
+        cleanupStaleSafImportCache()
+        val savedPid = savedInstanceState?.getInt(STATE_OPEN_PID, -1) ?: -1
+        handledOpenKey = if (savedPid == android.os.Process.myPid()) {
+            savedInstanceState?.getString(STATE_OPEN_KEY)
+        } else {
+            null
+        }
         val key = openKey(intent)
-        // A restored activity can still receive a brand-new VIEW intent after
-        // the process was killed; only skip intents this activity already saw.
-        // 被系统重建的 Activity 仍可能收到全新的 VIEW Intent；只跳过已经处理过的
-        // 同一个 Intent。
-        if (key != null && key != handledOpenKey) {
+        val fromHistory = (intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        // Skip intents already handled by this process (e.g., rotation) or replayed
+        // from Recents, while accepting fresh ACTION_VIEW launches after process death.
+        // 跳过当前进程已处理过的旋转重建 Intent 及最近任务重放，但允许进程被杀后
+        // 从文件管理器再次发起的全新 ACTION_VIEW 打开请求。
+        if (!fromHistory && key != null && key != handledOpenKey) {
             externalOpen.receive(intent)
             handledOpenKey = key
         }
@@ -52,7 +63,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        handledOpenKey?.let { outState.putString(STATE_OPEN_KEY, it) }
+        handledOpenKey?.let {
+            outState.putString(STATE_OPEN_KEY, it)
+            outState.putInt(STATE_OPEN_PID, android.os.Process.myPid())
+        }
     }
 
     private fun openKey(intent: Intent?): String? =
@@ -132,6 +146,17 @@ class MainActivity : FlutterActivity() {
                             copyToCache(Uri.parse(uri), name, result)
                         }
                     }
+                    "saveFileFromPath" -> {
+                        val sourcePath = call.argument<String>("sourcePath")
+                        val fileName = call.argument<String>("fileName") ?: "backup.mrbackup"
+                        val mimeType = call.argument<String>("mimeType")
+                            ?: "application/octet-stream"
+                        if (sourcePath == null) {
+                            result.error("bad_args", "Missing sourcePath", null)
+                        } else {
+                            saveFileFromPath(sourcePath, fileName, mimeType, result)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -194,12 +219,72 @@ class MainActivity : FlutterActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
-        startActivityForResult(intent, pickDirectoryRequest)
+        try {
+            startActivityForResult(intent, pickDirectoryRequest)
+        } catch (error: Exception) {
+            pendingPick = null
+            result.error("unavailable", error.message ?: "Cannot open directory picker", null)
+        }
+    }
+
+    private fun saveFileFromPath(
+        sourcePath: String,
+        fileName: String,
+        mimeType: String,
+        result: MethodChannel.Result,
+    ) {
+        if (pendingSaveResult != null) {
+            result.error("busy", "A save dialog is already open", null)
+            return
+        }
+        pendingSaveResult = result
+        pendingSaveSourcePath = sourcePath
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = mimeType
+            putExtra(Intent.EXTRA_TITLE, fileName)
+        }
+        try {
+            startActivityForResult(intent, createDocumentRequest)
+        } catch (error: Exception) {
+            pendingSaveResult = null
+            pendingSaveSourcePath = null
+            result.error("unavailable", error.message ?: "Cannot open save dialog", null)
+        }
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == createDocumentRequest) {
+            val result = pendingSaveResult ?: return
+            val sourcePath = pendingSaveSourcePath
+            pendingSaveResult = null
+            pendingSaveSourcePath = null
+            val uri = data?.data
+            if (resultCode != Activity.RESULT_OK || uri == null || sourcePath == null) {
+                result.success(false)
+                return
+            }
+            ioExecutor.execute {
+                try {
+                    val sourceFile = File(sourcePath)
+                    val output = contentResolver.openOutputStream(uri)
+                        ?: throw IllegalStateException("Cannot open destination")
+                    sourceFile.inputStream().use { input ->
+                        output.use { destination ->
+                            input.copyTo(destination)
+                        }
+                    }
+                    runOnUiThread { result.success(true) }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        result.error("saf_save_failed", error.message ?: "Cannot save document", null)
+                    }
+                }
+            }
+            return
+        }
         if (requestCode != pickDirectoryRequest) return
         val result = pendingPick ?: return
         pendingPick = null
@@ -489,21 +574,43 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun cleanupStaleSafImportCache() {
+        ioExecutor.execute {
+            try {
+                val directory = File(cacheDir, "saf_import")
+                if (!directory.exists()) return@execute
+                val cutoff = System.currentTimeMillis() - 60L * 60L * 1000L
+                directory.listFiles()?.forEach { file ->
+                    if (file.isFile && file.lastModified() < cutoff) {
+                        file.delete()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun copyToCache(uri: Uri, name: String, result: MethodChannel.Result) {
         ioExecutor.execute {
+            var target: File? = null
             try {
                 val directory = File(cacheDir, "saf_import").apply { mkdirs() }
                 val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
-                val target = File(directory, "${UUID.randomUUID()}_$safeName")
+                val dest = File(directory, "${UUID.randomUUID()}_$safeName")
+                target = dest
                 val input = contentResolver.openInputStream(uri)
                     ?: throw IllegalStateException("Cannot open document")
                 input.use { source ->
-                    target.outputStream().use { destination ->
+                    dest.outputStream().use { destination ->
                         source.copyTo(destination)
                     }
                 }
-                runOnUiThread { result.success(target.absolutePath) }
+                runOnUiThread { result.success(dest.absolutePath) }
             } catch (error: Exception) {
+                try {
+                    target?.delete()
+                } catch (_: Exception) {
+                }
                 runOnUiThread {
                     result.error("saf_copy_failed", error.message ?: "Cannot copy document", null)
                 }

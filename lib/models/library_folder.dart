@@ -15,11 +15,14 @@ class LibraryFolder {
   };
 
   factory LibraryFolder.fromJson(Map<String, Object?> json) {
+    final rawId = json['id'];
+    final rawName = json['name'];
+    final rawCreated = json['createdAt'];
     return LibraryFolder(
-      id: json['id'] as String? ?? '',
-      name: (json['name'] as String? ?? '文件夹').trim(),
+      id: rawId is String ? rawId : '',
+      name: (rawName is String ? rawName : '文件夹').trim(),
       createdAt:
-          DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+          DateTime.tryParse(rawCreated is String ? rawCreated : '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
     );
   }

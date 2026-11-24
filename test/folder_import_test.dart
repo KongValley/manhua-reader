@@ -50,4 +50,25 @@ void main() {
       'b.mobi',
     });
   });
+
+  test('respects maxFiles <= 0 and counts unique paths after dedup', () async {
+    final nested = Directory(p.join(temp.path, 'sub'));
+    await nested.create(recursive: true);
+    final first = File(p.join(temp.path, 'a.pdf'))..writeAsBytesSync([1]);
+    final second = File(p.join(nested.path, 'b.cbz'))..writeAsBytesSync([1]);
+
+    expect(await FolderImportScanner.scanFolder(temp, maxFiles: 0), isEmpty);
+    expect(await FolderImportScanner.scanFolder(temp, maxFiles: -3), isEmpty);
+
+    // Passing the same file twice should only consume 1 slot of maxFiles: 2.
+    final expanded = await FolderImportScanner.expandPaths([
+      first.path,
+      first.path,
+      second.path,
+    ], maxFiles: 2);
+    expect(expanded.map((file) => p.basename(file.path)).toList(), [
+      'a.pdf',
+      'b.cbz',
+    ]);
+  });
 }

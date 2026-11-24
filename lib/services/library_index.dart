@@ -15,6 +15,7 @@ class LibraryIndex {
   final Map<String, String> _searchText = {};
   final Map<String, String> _searchInitials = {};
   final Map<String, String?> _seriesOf = {};
+  final Map<String, String> _seriesDisplay = {};
   final Map<String, Set<String>> _tagsOf = {};
   final Map<String, Set<String>> _seriesBooks = {};
   final Map<String, Set<String>> _tagBooks = {};
@@ -23,6 +24,7 @@ class LibraryIndex {
     _searchText.clear();
     _searchInitials.clear();
     _seriesOf.clear();
+    _seriesDisplay.clear();
     _tagsOf.clear();
     _seriesBooks.clear();
     _tagBooks.clear();
@@ -38,8 +40,10 @@ class LibraryIndex {
     _searchInitials[book.id] = fields.map(_initials).join('\n');
     final series = book.series?.trim();
     if (series != null && series.isNotEmpty) {
-      _seriesOf[book.id] = series;
-      _seriesBooks.putIfAbsent(series, () => <String>{}).add(book.id);
+      final key = series.toLowerCase();
+      _seriesOf[book.id] = key;
+      _seriesDisplay.putIfAbsent(key, () => series);
+      _seriesBooks.putIfAbsent(key, () => <String>{}).add(book.id);
     } else {
       _seriesOf[book.id] = null;
     }
@@ -60,7 +64,10 @@ class LibraryIndex {
     if (oldSeries != null) {
       final ids = _seriesBooks[oldSeries];
       ids?.remove(book.id);
-      if (ids != null && ids.isEmpty) _seriesBooks.remove(oldSeries);
+      if (ids != null && ids.isEmpty) {
+        _seriesBooks.remove(oldSeries);
+        _seriesDisplay.remove(oldSeries);
+      }
     }
     final oldTags = _tagsOf.remove(book.id);
     if (oldTags != null) {
@@ -92,7 +99,7 @@ class LibraryIndex {
   }
 
   List<String> get seriesNames =>
-      _seriesBooks.keys.toList()
+      _seriesDisplay.values.toList()
         ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
 
   List<String> get tagNames =>
@@ -100,7 +107,8 @@ class LibraryIndex {
         ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
 
   Map<String, int> get seriesCounts => {
-    for (final entry in _seriesBooks.entries) entry.key: entry.value.length,
+    for (final entry in _seriesBooks.entries)
+      (_seriesDisplay[entry.key] ?? entry.key): entry.value.length,
   };
 
   Map<String, int> get tagCounts => {
@@ -118,15 +126,24 @@ class LibraryIndex {
     if (!ChineseHelper.containsChinese(value)) return '';
     try {
       return PinyinHelper.getShortPinyin(value).replaceAll(_nonAlphanumeric, '');
-    } on PinyinException {
-      // Keep searchable characters around dictionary gaps.
-      // 字典缺字时仍保留可搜索的相邻字符。
+    } on Object {
+      // Keep searchable characters around dictionary gaps or library edge cases.
+      // 字典缺字或异常字符时仍保留可搜索的相邻字符。
       final result = StringBuffer();
       for (final rune in value.runes) {
         final character = String.fromCharCode(rune);
-        final simplified = ChineseHelper.convertCharToSimplifiedChinese(character);
-        final pinyin = PinyinHelper.convertToPinyinArray(simplified, PinyinFormat.WITHOUT_TONE);
-        result.write(pinyin.isEmpty ? character : pinyin.first[0]);
+        try {
+          final simplified =
+              ChineseHelper.convertCharToSimplifiedChinese(character);
+          final pinyin = PinyinHelper.convertToPinyinArray(
+            simplified,
+            PinyinFormat.WITHOUT_TONE,
+          );
+          final first = pinyin.isEmpty ? '' : pinyin.first;
+          result.write(first.isEmpty ? character : first[0]);
+        } on Object {
+          result.write(character);
+        }
       }
       return result.toString().replaceAll(_nonAlphanumeric, '');
     }

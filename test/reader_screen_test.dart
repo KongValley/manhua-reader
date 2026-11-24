@@ -410,4 +410,106 @@ void main() {
       expect(find.text(_counter(3)), findsOneWidget);
     });
   });
+
+  testWidgets('jumps via page dialog without controller disposal error', (
+    tester,
+  ) async {
+    await _withReader(tester, (shelf) async {
+      await tester.tap(find.text(_counter(4)));
+      await tester.pumpAndSettle();
+      expect(find.text('跳转到页码'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), '2');
+      await tester.tap(find.text('跳转'));
+      await tester.pumpAndSettle();
+      expect(find.text(_counter(2)), findsOneWidget);
+    });
+  });
+
+  testWidgets('disables out-of-bounds spread nav buttons and keeps rapid turns in range', (
+    tester,
+  ) async {
+    await _withReader(
+      tester,
+      (shelf) async {
+        expect(find.text('1 / 5'), findsOneWidget);
+        final prev = tester.widget<IconButton>(
+          find.widgetWithIcon(IconButton, Icons.chevron_left_rounded),
+        );
+        expect(prev.onPressed, isNull);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.end);
+        await tester.pumpAndSettle();
+        expect(find.text('4–5 / 5'), findsOneWidget);
+        final next = tester.widget<IconButton>(
+          find.widgetWithIcon(IconButton, Icons.chevron_right_rounded),
+        );
+        expect(next.onPressed, isNull);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
+        await tester.pumpAndSettle();
+        expect(find.text('1 / 5'), findsOneWidget);
+      },
+      prepare: (shelf) {
+        shelf.volume1
+          ..lastPage = 0
+          ..doublePage = true;
+      },
+    );
+  });
+
+  testWidgets('pops reader route with an active snackbar cleanly', (tester) async {
+    await tester.runAsync(() async {
+      tester.view.physicalSize = const Size(800, 600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      ComicSourceFactory.debugOpener = (book) async => _FakeSource();
+      addTearDown(() => ComicSourceFactory.debugOpener = null);
+
+      final temp = await Directory.systemTemp.createTemp('manhua_pop_reg_');
+      final paths = await AppPaths.create(temp);
+      final repository = LibraryRepository(paths);
+      await repository.load();
+      final book = _volume('v1', '第1卷', paths.booksDir.path)..lastPage = 0;
+
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: buildAppTheme(),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          ReaderScreen(book: book, repository: repository),
+                    ),
+                  ),
+                  child: const Text('打开阅读'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('打开阅读'));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byTooltip('锁定触摸翻页'));
+        await tester.pump();
+        expect(find.byTooltip('解除触摸锁定'), findsOneWidget);
+
+        await tester.tap(find.byTooltip('返回书架'));
+        await tester.pumpAndSettle();
+        expect(find.text('打开阅读'), findsOneWidget);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump();
+        await repository.flush();
+        repository.dispose();
+        if (await temp.exists()) await temp.delete(recursive: true);
+      }
+    });
+  });
 }

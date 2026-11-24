@@ -36,13 +36,17 @@ class Bookmark {
   };
 
   factory Bookmark.fromJson(Map<String, Object?> json) {
+    final rawPage = json['page'];
+    final rawCreated = json['createdAt'];
+    final rawLabel = json['label'];
+    final rawNote = json['note'];
     return Bookmark(
-      page: (json['page'] as num?)?.toInt() ?? 0,
+      page: rawPage is num ? rawPage.toInt() : 0,
       createdAt:
-          DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+          DateTime.tryParse(rawCreated is String ? rawCreated : '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
-      label: json['label'] as String?,
-      note: json['note'] as String?,
+      label: rawLabel is String ? rawLabel : null,
+      note: rawNote is String ? rawNote : null,
     );
   }
 }

@@ -211,6 +211,36 @@ void main() {
     expect(restored.books.single.filePath, book.filePath);
     expect(restored.books.single.format, ComicFormat.album);
   });
+
+  test('distinguishes albums by directory path rather than title and size', () async {
+    final paths = await AppPaths.create(appDir);
+    final repository = LibraryRepository(paths);
+    await repository.load();
+    addTearDown(repository.dispose);
+
+    final secondAlbumDir = Directory(p.join(temp.path, 'other', '海边相册'));
+    await _write(secondAlbumDir, '001.jpg', _jpeg(120, 180));
+    await _write(secondAlbumDir, '002.jpg', _jpeg(120, 180));
+    await _write(secondAlbumDir, 'chapter-2/001.png', _png(90, 120));
+
+    final first = await repository.importAlbumDirectory(albumDir);
+    final second = await repository.importAlbumDirectory(secondAlbumDir);
+    expect(repository.books, hasLength(2));
+    expect(first.id, isNot(second.id));
+  });
+
+  test('regenerateCover returns false for album with unreadable image', () async {
+    final brokenAlbum = Directory(p.join(temp.path, 'broken_album'));
+    await _write(brokenAlbum, '001.jpg', Uint8List.fromList([0, 1, 2, 3, 4]));
+    final paths = await AppPaths.create(appDir);
+    final repository = LibraryRepository(paths);
+    await repository.load();
+    addTearDown(repository.dispose);
+
+    final book = await repository.importAlbumDirectory(brokenAlbum);
+    expect(book.coverPath, isNull);
+    expect(await repository.regenerateCover(book), isFalse);
+  });
 }
 
 Future<void> _write(Directory root, String relative, Uint8List bytes) async {

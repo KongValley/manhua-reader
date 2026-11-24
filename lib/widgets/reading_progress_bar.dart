@@ -55,6 +55,12 @@ class ReadingProgressBar extends StatelessWidget {
     end: Alignment.centerRight,
     colors: [Color(0xFFFFD08A), AppColors.accent, AppColors.accentDeep],
   );
+
+  static const successGradient = LinearGradient(
+    begin: Alignment.centerLeft,
+    end: Alignment.centerRight,
+    colors: [Color(0xFF56B470), AppColors.success],
+  );
 }
 
 class _ProgressBar extends StatelessWidget {

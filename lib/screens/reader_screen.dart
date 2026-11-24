@@ -26,6 +26,7 @@ import '../widgets/paper_page_view.dart';
 import '../widgets/pdf_password_dialog.dart';
 import '../widgets/reader_navigation_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
+import '../widgets/reading_stats_sheet.dart';
 import '../widgets/slider_ticks.dart';
 
 class ReaderScreen extends StatefulWidget {
@@ -90,8 +91,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   double _verticalWidth = -1;
   double _verticalHeight = -1;
   bool _verticalLayoutDirty = false;
+  bool _verticalNeedsAnchor = false;
+  int? _verticalAnimatingTargetPage;
   bool _restoringVerticalPosition = false;
   List<double> _pageOffsets = const [];
+  ScaffoldMessengerState? _messenger;
 
   bool _chromeVisible = true;
   bool _sliderActive = false;
@@ -278,6 +282,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _hideTimer?.cancel();
     _persistTimer?.cancel();
     _persistTimer = null;
+    _messenger?.hideCurrentSnackBar();
     _persistProgressNow();
     _stopReadingTimer();
     _autoTurn.configure(null);
@@ -332,6 +337,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _messenger = ScaffoldMessenger.maybeOf(context);
     // Subscribe to route coverage, including reader menus and dialogs.
     // 跟踪路由是否被阅读菜单或对话框覆盖。
     _routeVisible = ModalRoute.isCurrentOf(context) ?? true;
@@ -352,14 +358,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  void _flushReadingTime() =>
-      _repository.addReadingTime(_readingClock.takeSeconds());
+  void _flushReadingTime({bool notify = true}) => _repository.addReadingTime(
+    _readingClock.takeSeconds(),
+    book: _book,
+    notify: notify,
+  );
 
-  void _stopReadingTimer() {
+  void _stopReadingTimer({bool notify = true}) {
     _readingTimeTimer?.cancel();
     _readingTimeTimer = null;
     _readingClock.pause();
-    _flushReadingTime();
+    _flushReadingTime(notify: notify);
   }
 
   void _retryOpen() {
@@ -531,7 +540,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   bool _canAutoTurn() =>
-      !_loading && _source != null && _appActive && _routeVisible;
+      !_loading && _source != null && _appActive && _routeVisible && !_sliderActive;
 
   bool _autoTurnPage() {
     if (!mounted || !_canAutoTurn() || _pageCount <= 1) return false;
@@ -602,12 +611,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
-  void _persistProgressNow() {
+  void _persistProgressNow({bool notify = true}) {
     if (_source == null || _loading || _pageCount == 0) return;
     final finished = _mode == ReadingMode.vertical
         ? _verticalAtEnd
         : _onLastPage;
-    _repository.updateProgress(_book, finished ? _pageCount - 1 : _currentPage);
+    _repository.updateProgress(
+      _book,
+      finished ? _pageCount - 1 : _currentPage,
+      notify: notify,
+    );
   }
 
   void _handleHorizontalSettled(int slot) {
@@ -665,6 +678,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     if (target != _currentPage) setState(() => _currentPage = target);
     _persistProgressSoon();
+    _scheduleAutoTurn();
     final controller = _verticalController;
     if (controller == null ||
         !controller.hasClients ||
@@ -676,39 +690,55 @@ class _ReaderScreenState extends State<ReaderScreen>
       controller.position.maxScrollExtent,
     );
     if (animate) {
-      controller.animateTo(
-        offset,
-        duration: const Duration(milliseconds: 260),
-        curve: Curves.easeOutCubic,
+      _verticalAnimatingTargetPage = target;
+      unawaited(
+        controller
+            .animateTo(
+              offset,
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeOutCubic,
+            )
+            .whenComplete(() {
+              if (_verticalAnimatingTargetPage == target) {
+                _verticalAnimatingTargetPage = null;
+              }
+            }),
       );
     } else {
+      _verticalAnimatingTargetPage = null;
       controller.jumpTo(offset);
     }
   }
 
   void _goPrevious({bool revealChrome = false}) {
+    final activePage = _mode == ReadingMode.horizontal
+        ? (_pendingHorizontalPage ?? _currentPage)
+        : _currentPage;
     if (_usesSpreads && _spreads.isNotEmpty) {
-      final index = spreadIndexForPage(_spreads, _currentPage);
+      final index = spreadIndexForPage(_spreads, activePage);
       if (index > 0) {
         _goToPage(_spreads[index - 1].first, revealChrome: revealChrome);
       }
       return;
     }
-    if (_currentPage > 0) {
-      _goToPage(_currentPage - 1, revealChrome: revealChrome);
+    if (activePage > 0) {
+      _goToPage(activePage - 1, revealChrome: revealChrome);
     }
   }
 
   void _goNext({bool revealChrome = false}) {
+    final activePage = _mode == ReadingMode.horizontal
+        ? (_pendingHorizontalPage ?? _currentPage)
+        : _currentPage;
     if (_usesSpreads && _spreads.isNotEmpty) {
-      final index = spreadIndexForPage(_spreads, _currentPage);
+      final index = spreadIndexForPage(_spreads, activePage);
       if (index + 1 < _spreads.length) {
         _goToPage(_spreads[index + 1].first, revealChrome: revealChrome);
       }
       return;
     }
-    if (_currentPage < _pageCount - 1) {
-      _goToPage(_currentPage + 1, revealChrome: revealChrome);
+    if (activePage < _pageCount - 1) {
+      _goToPage(activePage + 1, revealChrome: revealChrome);
     }
   }
 
@@ -827,6 +857,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     setState(() {
       _autoCrop = value;
       _verticalLayoutDirty = true;
+      _verticalNeedsAnchor = true;
     });
     _repository.setAutoCrop(value);
   }
@@ -872,6 +903,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         spreadOffset: _spreadOffset,
         tapZoneWidth: _tapZoneWidth,
         autoCrop: _autoCrop,
+        canDoublePage: _pageCount > 1,
         hasBookPrefs:
             _book.readingMode != null ||
             _book.rightToLeft != null ||
@@ -926,9 +958,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _toggleBookmark() {
+    final targetBook = _book;
     final page = _currentPage;
-    final wasBookmarked = _book.isBookmarked(page);
-    _repository.toggleBookmark(_book, page);
+    final wasBookmarked = targetBook.isBookmarked(page);
+    _repository.toggleBookmark(targetBook, page);
     setState(() {});
     _keepChromeVisible();
     if (wasBookmarked) {
@@ -938,22 +971,24 @@ class _ReaderScreenState extends State<ReaderScreen>
         '已添加书签 · 第 ${page + 1} 页',
         action: SnackBarAction(
           label: '命名',
-          onPressed: () => _editBookmark(page),
+          onPressed: () => _editBookmark(page, book: targetBook),
         ),
       );
     }
   }
 
-  Future<void> _editBookmark(int page) async {
-    final existing = _book.bookmarkAt(page);
+  Future<void> _editBookmark(int page, {ComicBook? book}) async {
+    final targetBook = book ?? _book;
+    if (!mounted || targetBook != _book) return;
+    final existing = targetBook.bookmarkAt(page);
     final result = await showBookmarkEditorDialog(
       context,
       page: page,
       existing: existing,
     );
-    if (!mounted || result == null) return;
+    if (!mounted || result == null || targetBook != _book) return;
     _repository.setBookmark(
-      _book,
+      targetBook,
       page,
       label: result.label,
       note: result.note,
@@ -976,6 +1011,21 @@ class _ReaderScreenState extends State<ReaderScreen>
           margin: const EdgeInsets.fromLTRB(70, 0, 70, 110),
         ),
       );
+  }
+
+  Future<void> _openReadingStats() async {
+    _hideTimer?.cancel();
+    _stopReadingTimer();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ReadingStatsSheet(repository: _repository),
+    );
+    if (!mounted) return;
+    _syncReadingTimer();
+    _keepChromeVisible();
+    _scheduleAutoTurn();
   }
 
   Future<void> _openNavigation() async {
@@ -1004,6 +1054,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted) return;
     setState(() {});
     _keepChromeVisible();
+    _scheduleAutoTurn();
   }
 
   void _disposeLater(ScrollController? controller) {
@@ -1023,6 +1074,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         old != null) {
       return;
     }
+    final needsAnchor =
+        old == null || width != _verticalWidth || _verticalNeedsAnchor;
     final page = _currentPage;
     var fraction = 0.0;
     if (old != null && old.hasClients && _pageOffsets.length > page + 1) {
@@ -1042,6 +1095,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _verticalWidth = width;
     _verticalHeight = height;
     _verticalLayoutDirty = false;
+    _verticalNeedsAnchor = false;
     _pageOffsets = offsets;
     final anchor =
         offsets[page] + fraction * (offsets[page + 1] - offsets[page]);
@@ -1061,6 +1115,36 @@ class _ReaderScreenState extends State<ReaderScreen>
         return;
       }
       final position = controller.position;
+      final animatingPage = _verticalAnimatingTargetPage;
+      if (animatingPage != null && animatingPage < offsets.length) {
+        final target = offsets[animatingPage].clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        );
+        if ((controller.offset - target).abs() > 0.5) {
+          unawaited(
+            controller
+                .animateTo(
+                  target,
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                )
+                .whenComplete(() {
+                  if (_verticalAnimatingTargetPage == animatingPage) {
+                    _verticalAnimatingTargetPage = null;
+                  }
+                }),
+          );
+        }
+        return;
+      }
+      if (!needsAnchor && position.isScrollingNotifier.value) {
+        // Keep active touch drags or fling momentum intact while off-screen
+        // page sizes settle.
+        // 后台发现页面尺寸时，不打断用户正在进行的拖动或惯性滚动。
+        _onVerticalScroll();
+        return;
+      }
       final target = restoreEnd
           ? position.maxScrollExtent
           : anchor.clamp(position.minScrollExtent, position.maxScrollExtent);
@@ -1117,6 +1201,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
     if ((target - position.pixels).abs() < 0.5) return;
+    _scheduleAutoTurn();
     controller.animateTo(
       target,
       duration: const Duration(milliseconds: 260),
@@ -1149,43 +1234,19 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _showJumpDialog() async {
     _hideTimer?.cancel();
-    final controller = TextEditingController(text: '${_currentPage + 1}');
     final result = await showDialog<int>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('跳转到页面'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          textInputAction: TextInputAction.go,
-          decoration: InputDecoration(
-            labelText: '页码',
-            helperText: '共 $_pageCount 页',
-            suffixText: '/ $_pageCount',
-          ),
-          onSubmitted: (value) =>
-              Navigator.of(context).pop(int.tryParse(value)),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(context).pop(int.tryParse(controller.text.trim())),
-            child: const Text('跳转'),
-          ),
-        ],
+      builder: (context) => _JumpPageDialog(
+        currentPage: _currentPage,
+        pageCount: _pageCount,
       ),
     );
-    controller.dispose();
     if (!mounted) return;
     if (result != null) {
       _goToPage(result - 1, revealChrome: true);
     }
     _scheduleChromeHide();
+    _scheduleAutoTurn();
   }
 
   @override
@@ -1194,13 +1255,21 @@ class _ReaderScreenState extends State<ReaderScreen>
     _unbindLayoutSource();
     _hideTimer?.cancel();
     _persistTimer?.cancel();
-    _stopReadingTimer();
+    _stopReadingTimer(notify: false);
     _autoTurn.dispose();
     VolumeKeys.stop();
     unawaited(VolumeKeys.setEnabled(false));
     unawaited(ScreenAwake.setEnabled(false));
-    _persistProgressNow();
+    _persistProgressNow(notify: false);
     unawaited(_repository.flush());
+    final messenger = _messenger;
+    if (messenger != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (messenger.mounted) {
+          messenger.hideCurrentSnackBar();
+        }
+      });
+    }
     _pageController?.dispose();
     _verticalController?.dispose();
     final source = _source;
@@ -1409,104 +1478,111 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
               child: SafeArea(
                 bottom: false,
-                child: SizedBox(
-                  height: 58,
-                  child: Row(
-                    children: [
-                      const SizedBox(width: 4),
-                      IconButton(
-                        onPressed: () => Navigator.of(context).maybePop(),
-                        icon: const Icon(
-                          Icons.arrow_back_ios_new_rounded,
-                          size: 20,
-                        ),
-                        tooltip: '返回书架',
-                      ),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              _book.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 14.5,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white,
-                                shadows: [
-                                  Shadow(
-                                    color: Color(0x99000000),
-                                    blurRadius: 6,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      height: 58,
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 4),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).maybePop(),
+                            icon: const Icon(
+                              Icons.arrow_back_ios_new_rounded,
+                              size: 20,
+                            ),
+                            tooltip: '返回书架',
+                          ),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  _book.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white,
+                                    shadows: [
+                                      Shadow(
+                                        color: Color(0x99000000),
+                                        blurRadius: 6,
+                                      ),
+                                    ],
                                   ),
-                                ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _topSubtitleText,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white.withValues(alpha: 0.7),
+                                    fontFeatures: const [
+                                      FontFeature.tabularFigures(),
+                                    ],
+                                    shadows: const [
+                                      Shadow(
+                                        color: Color(0x99000000),
+                                        blurRadius: 5,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: _toggleBookmark,
+                            tooltip: bookmarked ? '移除书签' : '添加书签',
+                            icon: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 150),
+                              transitionBuilder: (child, animation) =>
+                                  ScaleTransition(scale: animation, child: child),
+                              child: Icon(
+                                bookmarked
+                                    ? Icons.bookmark_rounded
+                                    : Icons.bookmark_border_rounded,
+                                key: ValueKey(bookmarked),
+                                size: 22,
+                                color: bookmarked ? AppColors.accent : Colors.white,
                               ),
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              _topSubtitleText,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.white.withValues(alpha: 0.7),
-                                fontFeatures: const [
-                                  FontFeature.tabularFigures(),
-                                ],
-                                shadows: const [
-                                  Shadow(
-                                    color: Color(0x99000000),
-                                    blurRadius: 5,
-                                  ),
-                                ],
+                          ),
+                          IconButton(
+                            onPressed: _openNavigation,
+                            icon: const Icon(Icons.toc_rounded, size: 22),
+                            tooltip: '目录、书签与缩略图',
+                          ),
+                          if (_mode == ReadingMode.horizontal)
+                            IconButton(
+                              onPressed: _toggleDirection,
+                              icon: Icon(
+                                Icons.swap_horiz_rounded,
+                                size: 22,
+                                color: _rightToLeft
+                                    ? AppColors.accent
+                                    : Colors.white,
                               ),
+                              tooltip: _rightToLeft ? '从右向左阅读' : '从左向右阅读',
                             ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _toggleBookmark,
-                        tooltip: bookmarked ? '移除书签' : '添加书签',
-                        icon: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 150),
-                          transitionBuilder: (child, animation) =>
-                              ScaleTransition(scale: animation, child: child),
-                          child: Icon(
-                            bookmarked
-                                ? Icons.bookmark_rounded
-                                : Icons.bookmark_border_rounded,
-                            key: ValueKey(bookmarked),
-                            size: 22,
-                            color: bookmarked ? AppColors.accent : Colors.white,
+                          IconButton(
+                            onPressed: _openReaderSettings,
+                            icon: const Icon(Icons.tune_rounded, size: 22),
+                            tooltip: '阅读设置',
                           ),
-                        ),
+                          const SizedBox(width: 4),
+                        ],
                       ),
-                      IconButton(
-                        onPressed: _openNavigation,
-                        icon: const Icon(Icons.toc_rounded, size: 22),
-                        tooltip: '目录、书签与缩略图',
-                      ),
-                      if (_mode == ReadingMode.horizontal)
-                        IconButton(
-                          onPressed: _toggleDirection,
-                          icon: Icon(
-                            Icons.swap_horiz_rounded,
-                            size: 22,
-                            color: _rightToLeft
-                                ? AppColors.accent
-                                : Colors.white,
-                          ),
-                          tooltip: _rightToLeft ? '从右向左阅读' : '从左向右阅读',
-                        ),
-                      IconButton(
-                        onPressed: _openReaderSettings,
-                        icon: const Icon(Icons.tune_rounded, size: 22),
-                        tooltip: '阅读设置',
-                      ),
-                      const SizedBox(width: 4),
-                    ],
-                  ),
+                    ),
+                    _buildReadingTimeBadge(),
+                  ],
                 ),
               ),
             ),
@@ -1516,9 +1592,90 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  Widget _buildReadingTimeBadge() {
+    return ListenableBuilder(
+      listenable: _repository,
+      builder: (context, _) {
+        final stats = _repository.stats;
+        final now = DateTime.now();
+        final todaySeconds = stats.secondsToday(now);
+        final goalMinutes = stats.dailyGoalMinutes;
+        final goalMet = stats.isGoalMetOn(now);
+        final accent = goalMet ? AppColors.success : AppColors.accent;
+        final label = goalMinutes > 0
+            ? '今日已看 ${formatCompactReadingDuration(todaySeconds)} / $goalMinutes 分钟${goalMet ? ' · 已达标' : ''}'
+            : '今日已看 ${formatCompactReadingDuration(todaySeconds)}';
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 2),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _openReadingStats,
+              borderRadius: BorderRadius.circular(20),
+              child: Ink(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: goalMet
+                        ? AppColors.success.withValues(alpha: 0.35)
+                        : Colors.white.withValues(alpha: 0.12),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      goalMet ? Icons.verified_rounded : Icons.schedule_rounded,
+                      size: 12.5,
+                      color: accent,
+                    ),
+                    const SizedBox(width: 5),
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.white,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      size: 14,
+                      color: Colors.white.withValues(alpha: 0.72),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildBottomBar() {
     final maxPage = _pageCount > 1 ? (_pageCount - 1).toDouble() : 1.0;
-    final value = _currentPage.clamp(0, _pageCount - 1).toDouble();
+    final value = _pageCount > 0
+        ? _currentPage.clamp(0, _pageCount - 1).toDouble()
+        : 0.0;
+    final canGoPrevious = _usesSpreads && _spreads.isNotEmpty
+        ? spreadIndexForPage(_spreads, _currentPage) > 0
+        : _currentPage > 0;
+    final canGoNext = _usesSpreads && _spreads.isNotEmpty
+        ? spreadIndexForPage(_spreads, _currentPage) + 1 < _spreads.length
+        : _currentPage < _pageCount - 1;
     return Positioned(
       left: 0,
       right: 0,
@@ -1583,6 +1740,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                                         ? (_) {
                                             _sliderActive = false;
                                             _scheduleChromeHide();
+                                            _scheduleAutoTurn();
                                           }
                                         : null,
                                   ),
@@ -1620,7 +1778,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                             _ReaderIconButton(
                               icon: Icons.chevron_left_rounded,
                               tooltip: '上一页',
-                              onPressed: _currentPage > 0
+                              onPressed: canGoPrevious
                                   ? () => _goPrevious(revealChrome: true)
                                   : null,
                             ),
@@ -1656,7 +1814,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                             _ReaderIconButton(
                               icon: Icons.chevron_right_rounded,
                               tooltip: '下一页',
-                              onPressed: _currentPage < _pageCount - 1
+                              onPressed: canGoNext
                                   ? () => _goNext(revealChrome: true)
                                   : null,
                             ),
@@ -2065,6 +2223,77 @@ class _ErrorView extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _JumpPageDialog extends StatefulWidget {
+  const _JumpPageDialog({
+    required this.currentPage,
+    required this.pageCount,
+  });
+
+  final int currentPage;
+  final int pageCount;
+
+  @override
+  State<_JumpPageDialog> createState() => _JumpPageDialogState();
+}
+
+class _JumpPageDialogState extends State<_JumpPageDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: '${widget.currentPage + 1}');
+    _controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _controller.text.length,
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (widget.pageCount <= 0) {
+      Navigator.of(context).pop();
+      return;
+    }
+    final parsed = int.tryParse(_controller.text.trim());
+    Navigator.of(context).pop(parsed?.clamp(1, widget.pageCount));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: const Text('跳转到页码'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        decoration: InputDecoration(
+          labelText: '页码 (1 - ${widget.pageCount})',
+          border: const OutlineInputBorder(),
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('跳转'),
+        ),
+      ],
     );
   }
 }

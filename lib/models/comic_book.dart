@@ -250,7 +250,6 @@ class ComicBook {
       pinned: pinned ?? this.pinned,
       series: clearSeries ? null : (series ?? this.series),
       folderId: clearFolder ? null : (folderId ?? this.folderId),
-      tags: tags ?? this.tags,
       customCover: customCover ?? this.customCover,
       albumSort: albumSort ?? this.albumSort,
       albumSortDescending: albumSortDescending ?? this.albumSortDescending,
@@ -258,7 +257,8 @@ class ComicBook {
       rightToLeft: rightToLeft ?? this.rightToLeft,
       doublePage: doublePage ?? this.doublePage,
       spreadOffset: spreadOffset ?? this.spreadOffset,
-      bookmarks: bookmarks,
+      tags: List<String>.of(tags ?? this.tags),
+      bookmarks: List<Bookmark>.of(bookmarks),
     );
   }
 
@@ -290,73 +290,84 @@ class ComicBook {
   };
 
   factory ComicBook.fromJson(Map<String, Object?> json) {
-    final filePath = json['filePath'] as String? ?? '';
-    final formatName = json['format'] as String? ?? '';
+    String? str(Object? v) => v is String ? v : null;
+    int? integer(Object? v) => v is num ? v.toInt() : null;
+
+    final filePath = str(json['filePath']) ?? '';
+    final formatName = str(json['format']) ?? '';
     final inferred = formatName.isEmpty
         ? ComicFormat.fromExtension(
             filePath.contains('.') ? filePath.split('.').last : '',
           )
         : null;
-    final pageCount = (json['pageCount'] as num?)?.toInt() ?? 0;
+    final pageCount = integer(json['pageCount']) ?? 0;
     final tags = <String>[];
-    for (final item in (json['tags'] as List? ?? const [])) {
-      if (item is! String) continue;
-      final tag = item.trim();
-      if (tag.isEmpty || tags.contains(tag)) continue;
-      tags.add(tag);
-      if (tags.length >= 20) break;
+    final rawTags = json['tags'];
+    if (rawTags is List) {
+      for (final item in rawTags) {
+        if (item is! String) continue;
+        final tag = item.trim();
+        if (tag.isEmpty || tags.contains(tag)) continue;
+        tags.add(tag);
+        if (tags.length >= 20) break;
+      }
     }
-    final rawSeries = (json['series'] as String?)?.trim();
-    final rawFolder = (json['folderId'] as String?)?.trim();
-    final rawMode = json['readingMode'] as String?;
+    final rawSeries = str(json['series'])?.trim();
+    final rawFolder = str(json['folderId'])?.trim();
+    final rawMode = str(json['readingMode']);
     final readingMode = rawMode == null
         ? null
         : ReadingMode.values.where((mode) => mode.name == rawMode).firstOrNull;
-    final rawSpreadOffset = (json['spreadOffset'] as num?)?.toInt();
+    final rawSpreadOffset = integer(json['spreadOffset']);
     final spreadOffset =
         rawSpreadOffset == null ||
             rawSpreadOffset < 0 ||
             rawSpreadOffset > maxSpreadOffset
         ? null
         : rawSpreadOffset;
-    final bookmarks =
-        <Bookmark>[
-            for (final item in (json['bookmarks'] as List? ?? const []))
-              if (item is Map)
-                Bookmark.fromJson(
-                  item.map((key, value) => MapEntry('$key', value)),
-                ),
-          ]
-          ..removeWhere(
-            (bookmark) => bookmark.page < 0 || bookmark.page >= pageCount,
-          )
-          ..sort((a, b) => a.page.compareTo(b.page));
+    final bookmarks = <Bookmark>[];
+    final rawBookmarks = json['bookmarks'];
+    if (rawBookmarks is List) {
+      for (final item in rawBookmarks) {
+        if (item is! Map) continue;
+        final bookmark = Bookmark.fromJson(
+          item.map((key, value) => MapEntry('$key', value)),
+        );
+        if (bookmark.page < 0 || bookmark.page >= pageCount) continue;
+        bookmarks.add(bookmark);
+      }
+      bookmarks.sort((a, b) => a.page.compareTo(b.page));
+    }
 
     return ComicBook(
-      id: json['id'] as String? ?? '',
-      title: json['title'] as String? ?? '未命名',
-      originalName: json['originalName'] as String? ?? '',
+      id: str(json['id']) ?? '',
+      title: str(json['title']) ?? '未命名',
+      originalName: str(json['originalName']) ?? '',
       filePath: filePath,
       format: inferred ?? ComicFormat.fromName(formatName),
       pageCount: pageCount,
-      fileSize: (json['fileSize'] as num?)?.toInt() ?? 0,
+      fileSize: integer(json['fileSize']) ?? 0,
       addedAt:
-          DateTime.tryParse(json['addedAt'] as String? ?? '') ??
+          DateTime.tryParse(str(json['addedAt']) ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
-      lastPage: (json['lastPage'] as num?)?.toInt() ?? 0,
-      lastReadAt: DateTime.tryParse(json['lastReadAt'] as String? ?? ''),
-      coverPath: json['coverPath'] as String?,
+      lastPage: integer(json['lastPage']) ?? 0,
+      lastReadAt: DateTime.tryParse(str(json['lastReadAt']) ?? ''),
+      coverPath: str(json['coverPath']),
       favorite: json['favorite'] == true,
       pinned: json['pinned'] == true,
       series: rawSeries == null || rawSeries.isEmpty ? null : rawSeries,
       folderId: rawFolder == null || rawFolder.isEmpty ? null : rawFolder,
       tags: tags,
       customCover: json['customCover'] == true,
-      albumSort: AlbumSortField.fromName(json['albumSort'] as String? ?? ''),
+      albumSort: AlbumSortField.fromName(str(json['albumSort']) ?? ''),
       albumSortDescending: json['albumSortDescending'] == true,
       readingMode: readingMode,
-      rightToLeft: json['rightToLeft'] as bool?,
-      doublePage: json['doublePage'] as bool?,
+      rightToLeft: json['rightToLeft'] is bool
+          ? json['rightToLeft'] as bool
+          : null,
+      doublePage: json['doublePage'] is bool
+          ? json['doublePage'] as bool
+          : null,
       spreadOffset: spreadOffset,
       bookmarks: bookmarks,
     );

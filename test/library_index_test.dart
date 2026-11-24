@@ -48,4 +48,15 @@ void main() {
     expect(index.seriesCounts['新系列'], 1);
     expect(index.tagNames, ['日常']);
   });
+
+  test('groups series case-insensitively and handles unusual characters', () {
+    final index = LibraryIndex();
+    final upper = _book('1', 'Vol 1', series: 'One Piece');
+    final lower = _book('2', '🚀🎉✨', series: 'one piece');
+    index.rebuild([upper, lower]);
+
+    expect(index.seriesCounts.values.single, 2);
+    expect(index.matches(upper, 'one piece'), isTrue);
+    expect(index.matches(lower, '🚀'), isTrue);
+  });
 }

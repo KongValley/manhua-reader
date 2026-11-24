@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import '../models/comic_book.dart';
 import '../models/library_folder.dart';
 import '../models/library_settings.dart';
+import '../models/reading_stats.dart';
 import '../services/external_open_channel.dart';
 import '../services/folder_import.dart';
 import '../services/library_repository.dart';
@@ -128,6 +129,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _dragActive = false;
 
   bool _importing = false;
+  bool _importStarting = false;
+  bool _importCancellable = true;
   bool _cancelImport = false;
   String _importLabel = '';
   double _importProgress = 0;
@@ -144,6 +147,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    _repository.addListener(_pruneSelection);
     final externalOpen = widget.externalOpen;
     if (externalOpen != null) {
       widget.externalRoutes?.addListener(_scheduleExternalOpen);
@@ -154,10 +158,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    _repository.removeListener(_pruneSelection);
     widget.externalRoutes?.removeListener(_scheduleExternalOpen);
     widget.externalOpen?.listen(null);
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _pruneSelection() {
+    if (!_selectionMode && _selectedIds.isEmpty) return;
+    final existing = _repository.books.map((book) => book.id).toSet();
+    final removed = _selectedIds.where((id) => !existing.contains(id)).toList();
+    if (removed.isEmpty) return;
+    setState(() {
+      _selectedIds.removeAll(removed);
+      if (_selectedIds.isEmpty) {
+        _selectionMode = false;
+      }
+    });
   }
 
   bool get _supportsDesktopDrop =>
@@ -362,19 +380,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   void _toggleSelectAll(List<ComicBook> visible) {
     final ids = visible.map((book) => book.id).toSet();
+    final allSelected = ids.isNotEmpty && ids.every(_selectedIds.contains);
     setState(() {
-      if (ids.isNotEmpty && _selectedIds.length == ids.length) {
-        _selectedIds.clear();
+      if (allSelected) {
+        _selectedIds.removeAll(ids);
       } else {
-        _selectedIds
-          ..clear()
-          ..addAll(ids);
+        _selectedIds.addAll(ids);
       }
     });
   }
 
   Future<void> _pickAndImport() async {
-    if (_importing) return;
+    if (_importing || _importStarting) return;
+    setState(() => _importStarting = true);
 
     List<PlatformFile> files;
     try {
@@ -384,17 +402,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
         allowedExtensions: ComicFormat.allExtensions,
       );
     } catch (error) {
-      _toast('无法打开文件选择器：$error');
+      if (mounted) {
+        setState(() => _importStarting = false);
+        _toast('无法打开文件选择器：$error');
+        _scheduleExternalOpen();
+      }
       return;
     }
-    if (!mounted || files.isEmpty) return;
+    if (!mounted) return;
+    if (files.isEmpty || _importing) {
+      setState(() => _importStarting = false);
+      if (!_importing) _scheduleExternalOpen();
+      return;
+    }
     await _runImportCandidates([
       for (final file in files) _ImportCandidate(name: file.name, file: file),
     ]);
   }
 
   Future<void> _showImportOptions() async {
-    if (_importing) return;
+    if (_importing || _importStarting) return;
     final choice = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -455,7 +482,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
       ),
     );
-    if (!mounted || choice == null) return;
+    if (!mounted || choice == null || _importing || _importStarting) return;
     if (choice == 'files') {
       await _pickAndImport();
     } else if (choice == 'album') {
@@ -466,7 +493,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _pickAlbumAndImport() async {
-    if (_importing) return;
+    if (_importing || _importStarting) return;
+    setState(() => _importStarting = true);
     Directory? directory;
     String? treeUri;
     String name;
@@ -486,13 +514,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
         name = p.basename(directory.path);
       }
     } catch (error) {
-      _toast('无法打开文件夹选择器：$error');
+      if (mounted) _toast('无法打开文件夹选择器：$error');
       return;
+    } finally {
+      if (mounted && _importStarting) {
+        setState(() => _importStarting = false);
+        _scheduleExternalOpen();
+      }
     }
-    if (!mounted) return;
+    if (!mounted || _importing) return;
 
     setState(() {
       _importing = true;
+      _importCancellable = false;
+      _cancelImport = false;
+      _importSuccess = 0;
+      _importFailure = 0;
       _importLabel = '正在扫描相册';
       _importProgress = 0;
     });
@@ -517,9 +554,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         setState(() {
           _importing = false;
+          _importCancellable = true;
+          _cancelImport = false;
           _importLabel = '';
           _importProgress = 0;
         });
+        _scheduleExternalOpen();
       }
     }
   }
@@ -533,73 +573,90 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _pickFolderAndImport() async {
-    if (_importing) return;
-    if (SafFolderService.isSupported) {
-      String? uri;
-      List<SafFile> files;
-      String folderName;
-      try {
-        uri = await SafFolderService.pickDirectory();
-        if (uri == null) return;
-        files = await SafFolderService.listBooks(uri);
-        folderName = await SafFolderService.directoryName(uri);
-      } catch (error) {
-        _toast('无法读取文件夹：$error');
+    if (_importing || _importStarting) return;
+    setState(() => _importStarting = true);
+    var handedOff = false;
+    try {
+      if (SafFolderService.isSupported) {
+        String? uri;
+        List<SafFile> files;
+        String folderName;
+        try {
+          uri = await SafFolderService.pickDirectory();
+          if (uri == null) return;
+          files = await SafFolderService.listBooks(uri);
+          folderName = await SafFolderService.directoryName(uri);
+        } catch (error) {
+          if (mounted) _toast('无法读取文件夹：$error');
+          return;
+        }
+        if (!mounted || _importing) return;
+        if (files.isEmpty) {
+          _toast('文件夹里没有漫画文件；如需浏览图片，请用「导入图片相册」');
+          return;
+        }
+        final folder = _repository.ensureFolder(folderName);
+        handedOff = true;
+        try {
+          await _runImportCandidates([
+            for (final file in files)
+              _ImportCandidate(name: file.name, saf: file, folderId: folder.id),
+          ]);
+        } finally {
+          await _removeFolderIfEmpty(folder);
+        }
         return;
       }
-      if (!mounted) return;
+
+      Uri? uri;
+      try {
+        uri = await FilePicker.pickDirectory(dialogTitle: '选择漫画文件夹');
+      } catch (error) {
+        if (mounted) _toast('无法打开文件夹选择器：$error');
+        return;
+      }
+      if (!mounted || uri == null || _importing) return;
+      if (uri.scheme != 'file') {
+        _toast('当前平台无法直接读取该文件夹，请改用多选文件');
+        return;
+      }
+
+      final directory = Directory(uri.toFilePath());
+      List<File> files;
+      try {
+        files = await FolderImportScanner.scanFolder(directory);
+      } catch (error) {
+        if (mounted) _toast('无法扫描文件夹：$error');
+        return;
+      }
+      if (!mounted || _importing) return;
       if (files.isEmpty) {
         _toast('文件夹里没有漫画文件；如需浏览图片，请用「导入图片相册」');
         return;
       }
-      final folder = _repository.ensureFolder(folderName);
-      await _runImportCandidates([
-        for (final file in files)
-          _ImportCandidate(name: file.name, saf: file, folderId: folder.id),
-      ]);
-      await _removeFolderIfEmpty(folder);
-      return;
+      final folderName = p.basename(directory.path).trim();
+      final folder = _repository.ensureFolder(
+        folderName.isEmpty ? '导入的文件夹' : folderName,
+      );
+      handedOff = true;
+      try {
+        await _runImportCandidates([
+          for (final file in files)
+            _ImportCandidate(
+              name: p.basename(file.path),
+              path: file.path,
+              folderId: folder.id,
+            ),
+        ]);
+      } finally {
+        await _removeFolderIfEmpty(folder);
+      }
+    } finally {
+      if (!handedOff && mounted && _importStarting) {
+        setState(() => _importStarting = false);
+        if (!_importing) _scheduleExternalOpen();
+      }
     }
-
-    Uri? uri;
-    try {
-      uri = await FilePicker.pickDirectory(dialogTitle: '选择漫画文件夹');
-    } catch (error) {
-      _toast('无法打开文件夹选择器：$error');
-      return;
-    }
-    if (!mounted || uri == null) return;
-    if (uri.scheme != 'file') {
-      _toast('当前平台无法直接读取该文件夹，请改用多选文件');
-      return;
-    }
-
-    final directory = Directory(uri.toFilePath());
-    List<File> files;
-    try {
-      files = await FolderImportScanner.scanFolder(directory);
-    } catch (error) {
-      _toast('无法扫描文件夹：$error');
-      return;
-    }
-    if (!mounted) return;
-    if (files.isEmpty) {
-      _toast('文件夹里没有漫画文件；如需浏览图片，请用「导入图片相册」');
-      return;
-    }
-    final folderName = p.basename(directory.path).trim();
-    final folder = _repository.ensureFolder(
-      folderName.isEmpty ? '导入的文件夹' : folderName,
-    );
-    await _runImportCandidates([
-      for (final file in files)
-        _ImportCandidate(
-          name: p.basename(file.path),
-          path: file.path,
-          folderId: folder.id,
-        ),
-    ]);
-    await _removeFolderIfEmpty(folder);
   }
 
   Future<void> _removeFolderIfEmpty(LibraryFolder folder) async {
@@ -610,54 +667,70 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _importDropped(List<String> paths) async {
-    if (_importing || paths.isEmpty) return;
+    if (_importing || _importStarting || paths.isEmpty) return;
+    setState(() => _importStarting = true);
     final candidates = <_ImportCandidate>[];
     final createdFolders = <LibraryFolder>[];
+    var handedOff = false;
     try {
-      for (final path in paths) {
-        if (candidates.length >= FolderImportScanner.defaultMaxFiles) break;
-        final type = FileSystemEntity.typeSync(path, followLinks: false);
-        if (type == FileSystemEntityType.directory) {
-          final files = await FolderImportScanner.scanFolder(
-            Directory(path),
-            maxFiles: FolderImportScanner.defaultMaxFiles - candidates.length,
-          );
-          if (files.isEmpty) continue;
-          final name = p.basename(path).trim();
-          final folder = _repository.ensureFolder(
-            name.isEmpty ? '导入的文件夹' : name,
-          );
-          createdFolders.add(folder);
-          candidates.addAll([
-            for (final file in files)
-              _ImportCandidate(
-                name: p.basename(file.path),
-                path: file.path,
-                folderId: folder.id,
-              ),
-          ]);
-        } else if (type == FileSystemEntityType.file &&
-            FolderImportScanner.isImportableName(path)) {
-          candidates.add(_ImportCandidate(name: p.basename(path), path: path));
+      try {
+        for (final path in paths) {
+          if (candidates.length >= FolderImportScanner.defaultMaxFiles) break;
+          final type = FileSystemEntity.typeSync(path, followLinks: false);
+          if (type == FileSystemEntityType.directory) {
+            final files = await FolderImportScanner.scanFolder(
+              Directory(path),
+              maxFiles: FolderImportScanner.defaultMaxFiles - candidates.length,
+            );
+            if (files.isEmpty) continue;
+            final name = p.basename(path).trim();
+            final folder = _repository.ensureFolder(
+              name.isEmpty ? '导入的文件夹' : name,
+            );
+            createdFolders.add(folder);
+            candidates.addAll([
+              for (final file in files)
+                _ImportCandidate(
+                  name: p.basename(file.path),
+                  path: file.path,
+                  folderId: folder.id,
+                ),
+            ]);
+          } else if (type == FileSystemEntityType.file &&
+              FolderImportScanner.isImportableName(path)) {
+            candidates.add(_ImportCandidate(name: p.basename(path), path: path));
+          }
         }
+      } catch (error) {
+        if (mounted) _toast('无法读取拖入的文件：$error');
+        return;
       }
-    } catch (error) {
-      _toast('无法读取拖入的文件：$error');
-      return;
-    }
-    if (!mounted) return;
-    if (candidates.isEmpty) {
-      _toast('拖入的内容里没有漫画文件；图片文件夹请用「导入图片相册」');
-      return;
-    }
-    await _runImportCandidates(candidates);
-    for (final folder in createdFolders) {
-      await _removeFolderIfEmpty(folder);
+      if (!mounted || _importing) return;
+      if (candidates.isEmpty) {
+        _toast('拖入的内容里没有漫画文件；图片文件夹请用「导入图片相册」');
+        return;
+      }
+      handedOff = true;
+      await _runImportCandidates(candidates);
+    } finally {
+      for (final folder in createdFolders) {
+        await _removeFolderIfEmpty(folder);
+      }
+      if (!handedOff && mounted && _importStarting) {
+        setState(() => _importStarting = false);
+        if (!_importing) _scheduleExternalOpen();
+      }
     }
   }
 
   Future<void> _runImportCandidates(List<_ImportCandidate> candidates) async {
-    if (candidates.isEmpty || _importing) return;
+    if (candidates.isEmpty || _importing) {
+      if (_importStarting && mounted) {
+        setState(() => _importStarting = false);
+        if (!_importing) _scheduleExternalOpen();
+      }
+      return;
+    }
     _searchController.clear();
     setState(() {
       _query = '';
@@ -668,7 +741,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _favoritesOnly = false;
       _selectionMode = false;
       _selectedIds.clear();
+      _importStarting = false;
       _importing = true;
+      _importCancellable = true;
       _cancelImport = false;
       _importLabel = '准备导入';
       _importProgress = 0;
@@ -680,121 +755,128 @@ class _LibraryScreenState extends State<LibraryScreen> {
     var unsavedPasswords = 0;
     var cancelled = false;
     final errors = <String>[];
-    for (var i = 0; i < candidates.length; i++) {
-      if (_cancelImport) {
-        cancelled = true;
-        break;
-      }
-      final candidate = candidates[i];
-      final name = candidate.name;
-      if (!mounted) return;
-      setState(() {
-        _importLabel = '正在导入 $name（${i + 1}/${candidates.length}）';
-        _importProgress = i / candidates.length;
-      });
-
-      void progress(String label, double value) {
-        if (mounted) {
-          setState(() {
-            _importLabel = candidates.length > 1
-                ? '$label（${i + 1}/${candidates.length}）'
-                : label;
-            _importProgress = (i + value) / candidates.length;
-          });
+    try {
+      for (var i = 0; i < candidates.length; i++) {
+        if (_cancelImport) {
+          cancelled = true;
+          break;
         }
-      }
+        final candidate = candidates[i];
+        final name = candidate.name;
+        if (!mounted) return;
+        setState(() {
+          _importLabel = '正在导入 $name（${i + 1}/${candidates.length}）';
+          _importProgress = i / candidates.length;
+        });
 
-      final passwords = PdfPasswordFlow(
-        prompt: (errorText) async {
-          if (!mounted) return null;
-          return showPdfPasswordDialog(
-            context,
-            fileName: name,
-            errorText: errorText,
-          );
-        },
-      );
-
-      String? stagedPath;
-      try {
-        final ComicBook book;
-        final saf = candidate.saf;
-        final picked = candidate.file;
-        if (saf != null) {
-          progress('正在准备 $name', 0);
-          stagedPath = await SafFolderService.copyToCache(saf);
-          if (stagedPath == null || stagedPath.isEmpty) {
-            throw ImportException('无法读取文件夹中的文件');
+        void progress(String label, double value) {
+          if (mounted) {
+            setState(() {
+              _importLabel = candidates.length > 1
+                  ? '$label（${i + 1}/${candidates.length}）'
+                  : label;
+              _importProgress = (i + value) / candidates.length;
+            });
           }
-          book = await _repository.importFile(
-            stagedPath,
-            originalName: name,
-            folderId: candidate.folderId,
-            onProgress: progress,
-            pdfPasswordProvider: passwords.provide,
-          );
-        } else if (picked != null) {
-          final path = picked.path;
-          if (path != null && path.isNotEmpty) {
+        }
+
+        final passwords = PdfPasswordFlow(
+          prompt: (errorText) async {
+            if (!mounted) return null;
+            return showPdfPasswordDialog(
+              context,
+              fileName: name,
+              errorText: errorText,
+            );
+          },
+        );
+
+        String? stagedPath;
+        try {
+          final ComicBook book;
+          final saf = candidate.saf;
+          final picked = candidate.file;
+          if (saf != null) {
+            progress('正在准备 $name', 0);
+            stagedPath = await SafFolderService.copyToCache(saf);
+            if (stagedPath == null || stagedPath.isEmpty) {
+              throw ImportException('无法读取文件夹中的文件');
+            }
             book = await _repository.importFile(
-              path,
+              stagedPath,
+              originalName: name,
+              folderId: candidate.folderId,
+              onProgress: progress,
+              pdfPasswordProvider: passwords.provide,
+            );
+          } else if (picked != null) {
+            final path = picked.path;
+            if (path != null && path.isNotEmpty) {
+              book = await _repository.importFile(
+                path,
+                originalName: name,
+                folderId: candidate.folderId,
+                onProgress: progress,
+                pdfPasswordProvider: passwords.provide,
+              );
+            } else {
+              final totalSize = await picked.length();
+              if (!mounted) return;
+              book = await _repository.importStream(
+                originalName: name,
+                stream: picked.readAsByteStream(),
+                totalSize: totalSize,
+                folderId: candidate.folderId,
+                onProgress: progress,
+                pdfPasswordProvider: passwords.provide,
+              );
+            }
+          } else if (candidate.path != null) {
+            book = await _repository.importFile(
+              candidate.path!,
               originalName: name,
               folderId: candidate.folderId,
               onProgress: progress,
               pdfPasswordProvider: passwords.provide,
             );
           } else {
-            final totalSize = await picked.length();
-            if (!mounted) return;
-            book = await _repository.importStream(
-              originalName: name,
-              stream: picked.readAsByteStream(),
-              totalSize: totalSize,
-              folderId: candidate.folderId,
-              onProgress: progress,
-              pdfPasswordProvider: passwords.provide,
-            );
+            throw ImportException('无法读取文件');
           }
-        } else if (candidate.path != null) {
-          book = await _repository.importFile(
-            candidate.path!,
-            originalName: name,
-            folderId: candidate.folderId,
-            onProgress: progress,
-            pdfPasswordProvider: passwords.provide,
-          );
-        } else {
-          throw ImportException('无法读取文件');
+          if (!await passwords.onSuccess(book)) unsavedPasswords++;
+          imported++;
+        } on ImportException catch (error) {
+          errors.add('$name：${error.message}');
+        } catch (error) {
+          errors.add('$name：$error');
+        } finally {
+          if (stagedPath != null) {
+            try {
+              final temp = File(stagedPath);
+              if (await temp.exists()) await temp.delete();
+            } catch (_) {}
+          }
         }
-        if (!await passwords.onSuccess(book)) unsavedPasswords++;
-        imported++;
-      } on ImportException catch (error) {
-        errors.add('$name：${error.message}');
-      } catch (error) {
-        errors.add('$name：$error');
-      } finally {
-        if (stagedPath != null) {
-          try {
-            final temp = File(stagedPath);
-            if (await temp.exists()) await temp.delete();
-          } catch (_) {}
+        if (mounted) {
+          setState(() {
+            _importSuccess = imported;
+            _importFailure = errors.length;
+          });
         }
       }
+    } finally {
       if (mounted) {
         setState(() {
-          _importSuccess = imported;
-          _importFailure = errors.length;
+          _importing = false;
+          _importStarting = false;
+          _importCancellable = true;
+          _cancelImport = false;
+          _importProgress = 0;
         });
+        _scheduleExternalOpen();
       }
     }
 
     if (!mounted) return;
-    setState(() {
-      _importing = false;
-      _cancelImport = false;
-      _importProgress = 0;
-    });
-
     if (imported > 0 || cancelled) {
       final parts = <String>[];
       if (imported > 0) parts.add('已导入 $imported 本');
@@ -825,7 +907,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         !_externalRequested ||
         _externalScheduled ||
         _externalRunning ||
-        _importing) {
+        _importing ||
+        _importStarting) {
       return;
     }
     _externalScheduled = true;
@@ -843,6 +926,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (channel == null ||
         _externalRunning ||
         _importing ||
+        _importStarting ||
         top is! PageRoute<dynamic> ||
         !top.isCurrent) {
       return;
@@ -862,19 +946,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _externalBook = await _importExternalBook(request);
       }
 
-      final current = routes?.topRoute ?? top;
-      if (!mounted || current is! PageRoute<dynamic> || !current.isCurrent) {
-        return;
-      }
-      // Let the former reader dispose before the new one takes its channels.
-      // 等待旧阅读器释放频道后，再启动新的阅读器。
-      if (current.settings.name == readerRouteName) {
-        current.navigator!.pop();
-        await current.completed;
+      // Let any active reader route finish disposing before launching the next.
+      // 连续触发外部打开时先等待当前阅读器退出完成，再打开新漫画。
+      while (true) {
+        if (!mounted) return;
+        final active = routes?.topRoute ?? ModalRoute.of(context) ?? top;
+        if (active is! PageRoute<dynamic> || !active.isCurrent) return;
+        if (active.settings.name != readerRouteName) break;
+        final navigator = active.navigator;
+        if (navigator == null) return;
+        navigator.pop();
+        await active.completed;
       }
       if (!mounted) return;
       final nextTop = routes?.topRoute;
-      if (nextTop != null && nextTop is! PageRoute<dynamic>) return;
+      if (nextTop != null &&
+          (nextTop is! PageRoute<dynamic> || !nextTop.isCurrent)) {
+        return;
+      }
       final book = _externalBook!;
       _externalBook = null;
       unawaited(openComicBook(context, book: book, repository: _repository));
@@ -891,8 +980,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } finally {
       await request?.release();
       _externalRunning = false;
-      if (mounted && (routes?.topRoute ?? top) is PageRoute<dynamic>) {
-        _scheduleExternalOpen();
+      if (mounted) {
+        final currentTop = routes?.topRoute ?? ModalRoute.of(context);
+        if (currentTop is PageRoute<dynamic>) {
+          _scheduleExternalOpen();
+        }
       }
     }
   }
@@ -900,6 +992,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<ComicBook> _importExternalBook(ExternalOpenRequest request) async {
     setState(() {
       _importing = true;
+      _importCancellable = false;
+      _cancelImport = false;
       _importLabel = '正在打开 ${request.name}';
       _importProgress = 0;
       _importSuccess = 0;
@@ -937,6 +1031,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         setState(() {
           _importing = false;
+          _importCancellable = true;
+          _cancelImport = false;
+          _importLabel = '';
           _importProgress = 0;
         });
       }
@@ -963,6 +1060,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _showBookActions(ComicBook book) async {
     final missing = !_repository.fileExists(book);
     final finished = LibraryRepository.isFinished(book);
+    final totalBookSeconds = _repository.stats.bookSecondsTotal(book.id);
     final organization = [
       if (book.series != null) '系列：${book.series}',
       if (book.tags.isNotEmpty) book.tags.map((tag) => '#$tag').join(' '),
@@ -1006,7 +1104,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           Text(
                             '${book.format.label} · ${formatPageCount(book.pageCount)} · '
                             '${formatFileSize(book.fileSize)}'
-                            '${book.bookmarks.isEmpty ? '' : ' · ${book.bookmarks.length} 个书签'}',
+                            '${book.bookmarks.isEmpty ? '' : ' · ${book.bookmarks.length} 个书签'}'
+                            '${totalBookSeconds > 0 ? ' · 已看 ${formatCompactReadingDuration(totalBookSeconds)}' : ''}',
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -1859,7 +1958,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.7.1'),
+              Text('版本 1.8.0'),
             ],
           ),
         ),
@@ -1999,10 +2098,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             ),
                           ),
                         ),
+                      if (!_hasActiveFilters &&
+                          !_selectionMode &&
+                          (books.isNotEmpty ||
+                              _repository.stats.totalSeconds > 0 ||
+                              _repository.stats.dailyGoalMinutes > 0))
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+                            child: _DailyReadingStrip(
+                              stats: _repository.stats,
+                              onTap: _showStats,
+                            ),
+                          ),
+                        ),
                       if (showContinue)
                         SliverToBoxAdapter(
                           child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                            padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
                             child: _ContinueReadingCard(
                               book: lastRead,
                               onTap: () =>
@@ -2245,15 +2358,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 child: ListenableBuilder(
                   listenable: _repository,
                   builder: (context, _) {
+                    final visible = _visibleBooks(_repository.books);
+                    final visibleIds = visible.map((book) => book.id).toSet();
                     final selected = _repository.books
                         .where((book) => _selectedIds.contains(book.id))
                         .toList();
                     return _SelectionBar(
-                      selectedCount: _selectedIds.length,
+                      selectedCount: selected.length,
                       allSelected:
-                          _selectedIds.isNotEmpty &&
-                          _selectedIds.length ==
-                              _visibleBooks(_repository.books).length,
+                          visibleIds.isNotEmpty &&
+                          visibleIds.every(_selectedIds.contains),
                       allFavorite:
                           selected.isNotEmpty &&
                           selected.every((book) => book.favorite),
@@ -2261,8 +2375,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           selected.isNotEmpty &&
                           selected.every((book) => book.pinned),
                       onClose: _exitSelection,
-                      onSelectAll: () =>
-                          _toggleSelectAll(_visibleBooks(_repository.books)),
+                      onSelectAll: () => _toggleSelectAll(visible),
                       onFavorite: _favoriteSelected,
                       onPin: _pinSelected,
                       onMarkRead: _markSelectedRead,
@@ -2279,6 +2392,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 success: _importSuccess,
                 failure: _importFailure,
                 cancelling: _cancelImport,
+                cancellable: _importCancellable,
                 onCancel: _cancelRemainingImports,
               ),
             if (_dragActive) const _DropOverlay(),
@@ -2288,9 +2402,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
     if (!_supportsDesktopDrop) return content;
     return DropTarget(
-      enable: !_importing,
+      enable: !_importing && !_importStarting,
       onDragEntered: (_) {
-        if (!mounted || _importing) return;
+        if (!mounted || _importing || _importStarting) return;
         setState(() => _dragActive = true);
       },
       onDragExited: (_) {
@@ -3269,6 +3383,126 @@ class _FolderCard extends StatelessWidget {
                   ),
                 ],
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DailyReadingStrip extends StatelessWidget {
+  const _DailyReadingStrip({required this.stats, required this.onTap});
+
+  final ReadingStats stats;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final todaySeconds = stats.secondsToday(now);
+    final weekSeconds = stats.secondsThisWeek(now);
+    final streak = stats.currentStreak(now);
+    final goalMinutes = stats.dailyGoalMinutes;
+    final goalMet = stats.isGoalMetOn(now);
+    final progress = stats.goalProgressToday(now);
+    final accent = goalMet ? AppColors.success : AppColors.accent;
+
+    final subtitle = goalMinutes > 0
+        ? (goalMet
+              ? '已达成每日 $goalMinutes 分钟目标'
+              : '目标 $goalMinutes 分钟 · 已完成 ${(progress * 100).round()}%')
+        : (streak > 0
+              ? '连续 $streak 天 · 本周 ${formatCompactReadingDuration(weekSeconds)}'
+              : '本周已看 ${formatCompactReadingDuration(weekSeconds)}');
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.04),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: goalMet
+                  ? AppColors.success.withValues(alpha: 0.28)
+                  : Colors.white.withValues(alpha: 0.07),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    child: Icon(
+                      goalMet ? Icons.verified_rounded : Icons.schedule_rounded,
+                      size: 16,
+                      color: accent,
+                    ),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '今日已看 ${formatCompactReadingDuration(todaySeconds)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textPrimary,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: goalMet
+                                ? AppColors.success
+                                : AppColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '时间记录',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: accent,
+                    ),
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(Icons.chevron_right_rounded, size: 16, color: accent),
+                ],
+              ),
+              if (goalMinutes > 0) ...[
+                const SizedBox(height: 8),
+                ReadingProgressBar(
+                  value: progress,
+                  height: 4,
+                  gradient: goalMet ? ReadingProgressBar.successGradient : null,
+                ),
+              ],
             ],
           ),
         ),
@@ -4442,6 +4676,7 @@ class _ImportOverlay extends StatelessWidget {
     required this.failure,
     required this.cancelling,
     required this.onCancel,
+    this.cancellable = true,
   });
 
   final String label;
@@ -4450,6 +4685,7 @@ class _ImportOverlay extends StatelessWidget {
   final int failure;
   final bool cancelling;
   final VoidCallback onCancel;
+  final bool cancellable;
 
   @override
   Widget build(BuildContext context) {
@@ -4531,10 +4767,11 @@ class _ImportOverlay extends StatelessWidget {
                             ),
                           ),
                         ),
-                      TextButton(
-                        onPressed: cancelling ? null : onCancel,
-                        child: Text(cancelling ? '正在取消…' : '取消剩余'),
-                      ),
+                      if (cancellable)
+                        TextButton(
+                          onPressed: cancelling ? null : onCancel,
+                          child: Text(cancelling ? '正在取消…' : '取消剩余'),
+                        ),
                     ],
                   ),
                 ],

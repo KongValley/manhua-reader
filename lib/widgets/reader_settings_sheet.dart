@@ -28,6 +28,7 @@ class ReaderSettingsSheet extends StatefulWidget {
     required this.autoCrop,
     required this.hasBookPrefs,
     required this.isAndroid,
+    this.canDoublePage = true,
     required this.onModeChanged,
     required this.onRightToLeftChanged,
     required this.onDoublePageChanged,
@@ -61,6 +62,7 @@ class ReaderSettingsSheet extends StatefulWidget {
   /// 当前书是否保存了单独的阅读偏好。
   final bool hasBookPrefs;
   final bool isAndroid;
+  final bool canDoublePage;
 
   final ValueChanged<ReadingMode> onModeChanged;
   final ValueChanged<bool> onRightToLeftChanged;
@@ -283,46 +285,48 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                         ),
                       ),
                       if (_mode == ReadingMode.horizontal) ...[
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('双页模式'),
-                          subtitle: Text(
-                            _spreadOffset == 0
-                                ? '从首页开始两页一跨'
-                                : _spreadOffset >= 2
-                                ? '前两页单独显示，之后两页一跨'
-                                : '封面单独显示，之后两页一跨',
+                        if (widget.canDoublePage) ...[
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('双页模式'),
+                            subtitle: Text(
+                              _spreadOffset == 0
+                                  ? '从首页开始两页一跨'
+                                  : _spreadOffset >= 2
+                                  ? '前两页单独显示，之后两页一跨'
+                                  : '封面单独显示，之后两页一跨',
+                            ),
+                            value: _doublePage,
+                            onChanged: _setDoublePage,
                           ),
-                          value: _doublePage,
-                          onChanged: _setDoublePage,
-                        ),
-                        if (_doublePage)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 0, 6),
-                            child: SegmentedButton<int>(
-                              showSelectedIcon: false,
-                              style: ButtonStyle(
-                                visualDensity: VisualDensity.compact,
-                                textStyle: WidgetStatePropertyAll(
-                                  const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
+                          if (_doublePage)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 0, 0, 6),
+                              child: SegmentedButton<int>(
+                                showSelectedIcon: false,
+                                style: ButtonStyle(
+                                  visualDensity: VisualDensity.compact,
+                                  textStyle: WidgetStatePropertyAll(
+                                    const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  padding: WidgetStatePropertyAll(
+                                    const EdgeInsets.symmetric(horizontal: 6),
                                   ),
                                 ),
-                                padding: WidgetStatePropertyAll(
-                                  const EdgeInsets.symmetric(horizontal: 6),
-                                ),
+                                segments: const [
+                                  ButtonSegment(value: 0, label: Text('首页起成对')),
+                                  ButtonSegment(value: 1, label: Text('封面单页')),
+                                  ButtonSegment(value: 2, label: Text('前两页单独')),
+                                ],
+                                selected: {_spreadOffset},
+                                onSelectionChanged: (value) =>
+                                    _setSpreadOffset(value.first),
                               ),
-                              segments: const [
-                                ButtonSegment(value: 0, label: Text('首页起成对')),
-                                ButtonSegment(value: 1, label: Text('封面单页')),
-                                ButtonSegment(value: 2, label: Text('前两页单独')),
-                              ],
-                              selected: {_spreadOffset},
-                              onSelectionChanged: (value) =>
-                                  _setSpreadOffset(value.first),
                             ),
-                          ),
+                        ],
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('从右向左'),

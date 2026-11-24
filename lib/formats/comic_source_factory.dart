@@ -25,18 +25,7 @@ class ComicSourceFactory {
   }) async {
     final opener = debugOpener;
     if (opener != null) return opener(book);
-    if (book.format == ComicFormat.album) {
-      try {
-        return await AlbumComicSource.open(
-          book.filePath,
-          sort: albumSort ?? book.albumSort,
-          descending: albumSortDescending ?? book.albumSortDescending,
-        );
-      } on AlbumSourceException catch (error) {
-        throw ComicOpenException(error.message);
-      }
-    }
-    if (!await File(book.filePath).exists()) {
+    if (!book.format.isAlbum && !await File(book.filePath).exists()) {
       throw ComicOpenException('漫画文件已丢失，请重新导入');
     }
     try {

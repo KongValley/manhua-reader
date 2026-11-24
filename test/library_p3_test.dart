@@ -436,4 +436,35 @@ void main() {
       newSettings.toJson(),
     );
   });
+
+  test('persists per-book reading time, sessions and daily reading goal', () async {
+    final seeded = _book(id: 'comic-1', title: '测试漫画');
+    await seedLibrary([seeded]);
+
+    final repository = LibraryRepository(paths);
+    await repository.load();
+    final book = repository.books.single;
+
+    repository.addReadingTime(180, book: book);
+    repository.updateProgress(book, 5);
+    repository.setDailyReadingGoalMinutes(45);
+
+    expect(repository.stats.bookSecondsTotal(book.id), 180);
+    expect(repository.stats.dailyGoalMinutes, 45);
+    expect(
+      repository.stats.sessionsOn(DateTime.now()).single.bookTitle,
+      '测试漫画',
+    );
+    expect(repository.stats.bookPagesByDay(DateTime.now())[book.id], 5);
+
+    await repository.flush();
+    await close(repository);
+
+    final reloaded = LibraryRepository(paths);
+    await reloaded.load();
+    expect(reloaded.stats.bookSecondsTotal('comic-1'), 180);
+    expect(reloaded.stats.dailyGoalMinutes, 45);
+    expect(reloaded.stats.sessionsOn(DateTime.now()), hasLength(1));
+    await close(reloaded);
+  });
 }

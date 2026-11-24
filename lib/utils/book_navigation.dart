@@ -24,7 +24,11 @@ Future<void> openComicBook(
           builder: (context) => AlbumScreen(book: book, repository: repository),
         )
       : _readerRoute(book: book, repository: repository, page: page);
-  return Navigator.of(context).push(route);
+  return Navigator.of(context).push(route).whenComplete(() {
+    // Refresh listeners after the reader route finishes disposing its timer.
+    // 阅读器关闭并结算最后阅读时长后，通知书架刷新今日统计。
+    Future<void>.microtask(repository.notifyReadingSessionEnded);
+  });
 }
 
 MaterialPageRoute<void> _readerRoute({
