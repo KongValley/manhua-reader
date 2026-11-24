@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/reading_stats.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 import '../utils/format.dart';
 import 'reading_progress_bar.dart';
 
@@ -20,16 +21,30 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
   static const _goalPresets = [0, 15, 30, 45, 60, 90, 120];
   static const int _initialHistoryLimit = 14;
 
+  final ScrollController _heatmapScrollController = ScrollController();
+  final GlobalKey _selectedDetailKey = GlobalKey();
+
   bool _showDurationChart = true;
   late DateTime _selectedDate;
   bool _hasManualSelection = false;
   bool _showAllHistory = false;
+  int? _heatmapYear;
+  bool _pendingScrollToDetail = false;
 
   @override
   void initState() {
     super.initState();
     final now = DateTime.now();
     _selectedDate = _normalizeDay(now);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollHeatmapToEdge(toEnd: true, animate: false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _heatmapScrollController.dispose();
+    super.dispose();
   }
 
   static DateTime _normalizeDay(DateTime date) =>
@@ -48,11 +63,62 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
     return activeDays.isNotEmpty ? activeDays.first : today;
   }
 
-  void _selectDate(DateTime date) {
+  void _selectDate(
+    DateTime date, {
+    bool scrollToDetail = false,
+    List<DateTime>? activeDays,
+  }) {
     final normalized = _normalizeDay(date);
+    final needsExpand =
+        scrollToDetail &&
+        activeDays != null &&
+        !_showAllHistory &&
+        !activeDays.take(_initialHistoryLimit).any((d) => _isSameDay(d, normalized)) &&
+        activeDays.any((d) => _isSameDay(d, normalized));
     setState(() {
       _hasManualSelection = true;
       _selectedDate = normalized;
+      if (needsExpand) _showAllHistory = true;
+      if (scrollToDetail) _pendingScrollToDetail = true;
+    });
+    if (scrollToDetail) _scheduleScrollToDetail();
+  }
+
+  void _scheduleScrollToDetail() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pendingScrollToDetail) return;
+      _pendingScrollToDetail = false;
+      final targetContext = _selectedDetailKey.currentContext;
+      if (targetContext == null) return;
+      Scrollable.ensureVisible(
+        targetContext,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+        alignment: 0.15,
+      );
+    });
+  }
+
+  void _scrollHeatmapToEdge({required bool toEnd, bool animate = true}) {
+    if (!_heatmapScrollController.hasClients) return;
+    final target = toEnd ? _heatmapScrollController.position.maxScrollExtent : 0.0;
+    if (animate) {
+      _heatmapScrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _heatmapScrollController.jumpTo(target);
+    }
+  }
+
+  void _setHeatmapYear(int? year, int currentYear) {
+    if (_heatmapYear == year) return;
+    setState(() => _heatmapYear = year);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollHeatmapToEdge(toEnd: year == null || year == currentYear);
     });
   }
 
@@ -195,22 +261,12 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
             ? activeDays
             : activeDays.take(_initialHistoryLimit).toList();
 
-        return SafeArea(
-          top: false,
-          child: Container(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(context).height * 0.88,
-            ),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(26),
-              ),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-            ),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 10, 20, 22),
-              child: Column(
+        return AdaptiveSheetShell(
+          maxWidth: 820,
+          maxHeightFraction: 0.90,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 22),
+            child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -227,10 +283,10 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                   const SizedBox(height: 14),
                   _buildHeader(context, streak),
                   const SizedBox(height: 18),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _StatCard(
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final cards = [
+                        _StatCard(
                           label: '今日阅读',
                           value: formatGroupedNumber(todayPages),
                           unit: '页',
@@ -238,10 +294,7 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                           icon: Icons.today_rounded,
                           accent: AppColors.accent,
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _StatCard(
+                        _StatCard(
                           label: '本周阅读',
                           value: formatGroupedNumber(weekPages),
                           unit: '页',
@@ -249,24 +302,14 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                           icon: Icons.date_range_rounded,
                           accent: const Color(0xFF6B7BFF),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _StatCard(
+                        _StatCard(
                           label: '连续阅读',
                           value: formatGroupedNumber(streak),
                           unit: '天',
                           icon: Icons.local_fire_department_rounded,
                           accent: const Color(0xFFE5A56B),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _StatCard(
+                        _StatCard(
                           label: '累计阅读',
                           value: formatGroupedNumber(stats.totalPages),
                           unit: '页',
@@ -274,8 +317,46 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                           icon: Icons.auto_stories_rounded,
                           accent: const Color(0xFF7BC98B),
                         ),
-                      ),
-                    ],
+                      ];
+                      if (constraints.maxWidth >= 520) {
+                        return IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              for (var i = 0; i < cards.length; i++) ...[
+                                if (i > 0) const SizedBox(width: 10),
+                                Expanded(child: cards[i]),
+                              ],
+                            ],
+                          ),
+                        );
+                      }
+                      return Column(
+                        children: [
+                          IntrinsicHeight(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Expanded(child: cards[0]),
+                                const SizedBox(width: 10),
+                                Expanded(child: cards[1]),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          IntrinsicHeight(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Expanded(child: cards[2]),
+                                const SizedBox(width: 10),
+                                Expanded(child: cards[3]),
+                              ],
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
                   const SizedBox(height: 12),
                   _DailyGoalCard(
@@ -284,6 +365,27 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                     progress: stats.goalProgressToday(now),
                     goalMet: stats.isGoalMetOn(now),
                     onEdit: _pickDailyGoal,
+                  ),
+                  const SizedBox(height: 20),
+                  _AnnualHeatmapCard(
+                    stats: stats,
+                    todayDate: todayDate,
+                    selectedDay: selectedDay,
+                    selectedYear: _heatmapYear,
+                    showDuration: _showDurationChart,
+                    scrollController: _heatmapScrollController,
+                    resolveTitle: _resolveBookTitle,
+                    onYearChanged: (year) => _setHeatmapYear(year, now.year),
+                    onSelectDate: (date) => _selectDate(
+                      date,
+                      scrollToDetail: true,
+                      activeDays: activeDays,
+                    ),
+                    onJumpToDetail: () => _selectDate(
+                      selectedDay,
+                      scrollToDetail: true,
+                      activeDays: activeDays,
+                    ),
                   ),
                   const SizedBox(height: 20),
                   Row(
@@ -339,10 +441,14 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                   ),
                   const SizedBox(height: 10),
                   if (activeDays.isEmpty)
-                    _buildEmptyHistoryCard()
+                    KeyedSubtree(
+                      key: _selectedDetailKey,
+                      child: _buildEmptyHistoryCard(),
+                    )
                   else ...[
                     if (!activeDays.any((day) => _isSameDay(day, selectedDay)))
                       Padding(
+                        key: _selectedDetailKey,
                         padding: const EdgeInsets.only(bottom: 8),
                         child: _buildSelectedEmptyDayBanner(selectedDay, now),
                       ),
@@ -350,6 +456,9 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: _DailyRecordCard(
+                          key: _isSameDay(day, selectedDay)
+                              ? _selectedDetailKey
+                              : null,
                           date: day,
                           now: now,
                           seconds: stats.secondsOn(day),
@@ -405,7 +514,6 @@ class _ReadingStatsSheetState extends State<ReadingStatsSheet> {
                 ],
               ),
             ),
-          ),
         );
       },
     );
@@ -1036,6 +1144,7 @@ class _DayBar extends StatelessWidget {
 
 class _DailyRecordCard extends StatelessWidget {
   const _DailyRecordCard({
+    super.key,
     required this.date,
     required this.now,
     required this.seconds,
@@ -1064,12 +1173,7 @@ class _DailyRecordCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bookIds = <String>{...bookSeconds.keys, ...bookPages.keys}.toList()
-      ..sort((a, b) {
-        final secCmp = (bookSeconds[b] ?? 0).compareTo(bookSeconds[a] ?? 0);
-        if (secCmp != 0) return secCmp;
-        return (bookPages[b] ?? 0).compareTo(bookPages[a] ?? 0);
-      });
+    final bookIds = _sortBookIds(bookSeconds, bookPages);
     final maxBookSeconds = bookIds.fold<int>(
       0,
       (max, id) => (bookSeconds[id] ?? 0) > max ? (bookSeconds[id] ?? 0) : max,
@@ -1348,6 +1452,621 @@ class _BookDailyBreakdownRow extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+List<String> _sortBookIds(
+  Map<String, int> bookSeconds,
+  Map<String, int> bookPages,
+) {
+  return <String>{...bookSeconds.keys, ...bookPages.keys}.toList()..sort((
+    a,
+    b,
+  ) {
+    final secCmp = (bookSeconds[b] ?? 0).compareTo(bookSeconds[a] ?? 0);
+    if (secCmp != 0) return secCmp;
+    return (bookPages[b] ?? 0).compareTo(bookPages[a] ?? 0);
+  });
+}
+
+/// Full-year GitHub-style reading contribution heatmap card.
+/// 全年 GitHub 风格阅读贡献热力图卡片，支持切换年份及点选格子联动当日书目明细。
+class _AnnualHeatmapCard extends StatelessWidget {
+  const _AnnualHeatmapCard({
+    required this.stats,
+    required this.todayDate,
+    required this.selectedDay,
+    required this.selectedYear,
+    required this.showDuration,
+    required this.scrollController,
+    required this.resolveTitle,
+    required this.onYearChanged,
+    required this.onSelectDate,
+    required this.onJumpToDetail,
+  });
+
+  final ReadingStats stats;
+  final DateTime todayDate;
+  final DateTime selectedDay;
+  final int? selectedYear;
+  final bool showDuration;
+  final ScrollController scrollController;
+  final String Function(String bookId, List<ReadingSession> sessions)
+  resolveTitle;
+  final ValueChanged<int?> onYearChanged;
+  final ValueChanged<DateTime> onSelectDate;
+  final VoidCallback onJumpToDetail;
+
+  static const double _cellSize = 11.0;
+  static const double _cellGap = 3.0;
+  static const double _step = _cellSize + _cellGap;
+  static const List<String> _rowLabels = ['一', '', '三', '', '五', '', '日'];
+  static const List<Color> _levelColors = [
+    Color(0x0EFFFFFF),
+    Color(0xFF1F4B32),
+    Color(0xFF2D6E46),
+    Color(0xFF45A366),
+    AppColors.success,
+  ];
+
+  static DateTime _utcDay(DateTime date) =>
+      DateTime.utc(date.year, date.month, date.day);
+
+  static DateTime _localDay(DateTime utcDate) =>
+      DateTime(utcDate.year, utcDate.month, utcDate.day);
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  int _levelForDay(DateTime day, int maxValue) {
+    final seconds = stats.secondsOn(day);
+    final pages = stats.pagesOn(day);
+    if (seconds <= 0 && pages <= 0) return 0;
+
+    final primary = showDuration ? seconds : pages;
+    var level = 1;
+    if (primary > 0 && maxValue > 0) {
+      final ratio = primary / maxValue;
+      if (ratio > 0.75) {
+        level = 4;
+      } else if (ratio > 0.5) {
+        level = 3;
+      } else if (ratio > 0.25) {
+        level = 2;
+      }
+    }
+    if (stats.isGoalMetOn(day) && level < 3) {
+      level = 3;
+    }
+    return level;
+  }
+
+  List<({int weekIndex, String label})> _buildMonthLabels({
+    required DateTime gridStart,
+    required int weekCount,
+    required DateTime rangeStart,
+    required DateTime rangeEnd,
+  }) {
+    final labels = <({int weekIndex, String label})>[];
+    var lastWeek = -10;
+    for (var week = 0; week < weekCount; week++) {
+      DateTime? monthStart;
+      for (var row = 0; row < 7; row++) {
+        final date = gridStart.add(Duration(days: week * 7 + row));
+        if (date.isBefore(rangeStart) || date.isAfter(rangeEnd)) continue;
+        if (date.day == 1) {
+          monthStart = date;
+          break;
+        }
+      }
+      if (monthStart != null && week - lastWeek >= 2) {
+        labels.add((weekIndex: week, label: '${monthStart.month}月'));
+        lastWeek = week;
+      } else if (week == 0 && rangeStart.day <= 16) {
+        labels.add((weekIndex: 0, label: '${rangeStart.month}月'));
+        lastWeek = 0;
+      }
+    }
+    return labels;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final todayUtc = _utcDay(todayDate);
+    final DateTime rangeStart;
+    final DateTime rangeEnd;
+    if (selectedYear == null) {
+      rangeEnd = todayUtc;
+      rangeStart = DateTime.utc(
+        todayUtc.year - 1,
+        todayUtc.month,
+        todayUtc.day,
+      ).add(const Duration(days: 1));
+    } else {
+      rangeStart = DateTime.utc(selectedYear!, 1, 1);
+      rangeEnd = DateTime.utc(selectedYear!, 12, 31);
+    }
+    final summaryEnd = rangeEnd.isAfter(todayUtc) ? todayUtc : rangeEnd;
+    final summary = stats.summaryBetween(rangeStart, summaryEnd);
+    final gridStart = rangeStart.subtract(
+      Duration(days: rangeStart.weekday - 1),
+    );
+    final gridEnd = rangeEnd.add(Duration(days: 7 - rangeEnd.weekday));
+    final weekCount = (gridEnd.difference(gridStart).inDays ~/ 7) + 1;
+
+    var maxValue = 0;
+    if (!summaryEnd.isBefore(rangeStart)) {
+      for (
+        var cursor = rangeStart;
+        !cursor.isAfter(summaryEnd);
+        cursor = cursor.add(const Duration(days: 1))
+      ) {
+        final value = showDuration
+            ? stats.secondsOn(cursor)
+            : stats.pagesOn(cursor);
+        if (value > maxValue) maxValue = value;
+      }
+    }
+
+    final monthLabels = _buildMonthLabels(
+      gridStart: gridStart,
+      weekCount: weekCount,
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+    );
+    final years = stats.availableYears(todayDate);
+    final prefix = selectedYear == null ? '近一年' : '$selectedYear 年';
+    final metricSummary = showDuration
+        ? (summary.totalSeconds > 0
+              ? ' · 累计 ${formatReadingDuration(summary.totalSeconds)}'
+              : '')
+        : (summary.totalPages > 0
+              ? ' · 累计 ${formatGroupedNumber(summary.totalPages)} 页'
+              : '');
+    final goalSummary = stats.dailyGoalMinutes > 0 && summary.goalMetDays > 0
+        ? ' · 达标 ${summary.goalMetDays} 天'
+        : '';
+
+    final selectedSeconds = stats.secondsOn(selectedDay);
+    final selectedPages = stats.pagesOn(selectedDay);
+    final selectedGoalMet = stats.isGoalMetOn(selectedDay);
+    final bookSeconds = stats.bookSecondsByDay(selectedDay);
+    final bookPages = stats.bookPagesByDay(selectedDay);
+    final sessions = stats.sessionsOn(selectedDay);
+    final bookIds = _sortBookIds(bookSeconds, bookPages);
+    final hasAnySelected =
+        selectedSeconds > 0 || selectedPages > 0 || bookIds.isNotEmpty;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 13, 12, 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.035),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '年度阅读热力图',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '$prefix ${summary.activeDays} 天有阅读$metricSummary$goalSummary',
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Wrap(
+                spacing: 4,
+                runSpacing: 4,
+                children: [
+                  _HeatmapPeriodChip(
+                    label: '近一年',
+                    selected: selectedYear == null,
+                    onTap: () => onYearChanged(null),
+                  ),
+                  for (final year in years)
+                    _HeatmapPeriodChip(
+                      label: '$year年',
+                      selected: selectedYear == year,
+                      onTap: () => onYearChanged(year),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 18, right: 6),
+                child: Column(
+                  children: [
+                    for (final label in _rowLabels)
+                      SizedBox(
+                        height: _step,
+                        width: 14,
+                        child: Center(
+                          child: Text(
+                            label,
+                            style: const TextStyle(
+                              fontSize: 9,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Scrollbar(
+                  controller: scrollController,
+                  thumbVisibility: false,
+                  thickness: 2,
+                  child: SingleChildScrollView(
+                    controller: scrollController,
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: SizedBox(
+                      width: weekCount * _step,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            height: 16,
+                            width: weekCount * _step,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                for (final item in monthLabels)
+                                  Positioned(
+                                    left: item.weekIndex * _step,
+                                    top: 0,
+                                    child: Text(
+                                      item.label,
+                                      style: const TextStyle(
+                                        fontSize: 9.5,
+                                        color: AppColors.textSecondary,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (var week = 0; week < weekCount; week++)
+                                Column(
+                                  children: [
+                                    for (var row = 0; row < 7; row++)
+                                      _buildCell(
+                                        gridStart: gridStart,
+                                        week: week,
+                                        row: row,
+                                        rangeStart: rangeStart,
+                                        rangeEnd: rangeEnd,
+                                        todayUtc: todayUtc,
+                                        maxValue: maxValue,
+                                      ),
+                                  ],
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Text(
+                '点击格子可联动查看当天书目明细',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              const Spacer(),
+              const Text(
+                '少',
+                style: TextStyle(fontSize: 9.5, color: AppColors.textSecondary),
+              ),
+              const SizedBox(width: 4),
+              for (var level = 0; level < _levelColors.length; level++)
+                Container(
+                  width: 9,
+                  height: 9,
+                  margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                  decoration: BoxDecoration(
+                    color: _levelColors[level],
+                    borderRadius: BorderRadius.circular(2),
+                    border: level == 0
+                        ? Border.all(
+                            color: Colors.white.withValues(alpha: 0.05),
+                            width: 0.5,
+                          )
+                        : null,
+                  ),
+                ),
+              const SizedBox(width: 4),
+              const Text(
+                '多',
+                style: TextStyle(fontSize: 9.5, color: AppColors.textSecondary),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onJumpToDetail,
+              borderRadius: BorderRadius.circular(11),
+              child: Ink(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.03),
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.05),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          formatReadingDateLabel(selectedDay, todayDate),
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                        if (selectedGoalMet) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 1.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.success.withValues(alpha: 0.16),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Text(
+                              '达标',
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.success,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            hasAnySelected
+                                ? '${formatReadingDuration(selectedSeconds)} · ${formatGroupedNumber(selectedPages)} 页'
+                                : '暂无阅读记录',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                        ),
+                        const Text(
+                          '定位明细 ↓',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.accent,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (bookIds.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final bookId in bookIds)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppColors.accent.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(7),
+                                border: Border.all(
+                                  color: AppColors.accent.withValues(
+                                    alpha: 0.22,
+                                  ),
+                                ),
+                              ),
+                              child: Text(
+                                _bookChipText(
+                                  title: resolveTitle(bookId, sessions),
+                                  seconds: bookSeconds[bookId] ?? 0,
+                                  pages: bookPages[bookId] ?? 0,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 10.5,
+                                  color: AppColors.textPrimary,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _bookChipText({
+    required String title,
+    required int seconds,
+    required int pages,
+  }) {
+    final metric = seconds > 0
+        ? formatCompactReadingDuration(seconds)
+        : '$pages 页';
+    return '$title · $metric';
+  }
+
+  Widget _buildCell({
+    required DateTime gridStart,
+    required int week,
+    required int row,
+    required DateTime rangeStart,
+    required DateTime rangeEnd,
+    required DateTime todayUtc,
+    required int maxValue,
+  }) {
+    final utcDate = gridStart.add(Duration(days: week * 7 + row));
+    if (utcDate.isBefore(rangeStart) || utcDate.isAfter(rangeEnd)) {
+      return const SizedBox(width: _step, height: _step);
+    }
+    final isFuture = utcDate.isAfter(todayUtc);
+    final localDate = _localDay(utcDate);
+    final isToday = _sameDay(localDate, todayDate);
+    final isSelected = _sameDay(localDate, selectedDay);
+    final level = isFuture ? -1 : _levelForDay(localDate, maxValue);
+    final fillColor = level < 0
+        ? Colors.white.withValues(alpha: 0.025)
+        : _levelColors[level];
+
+    Border? border;
+    if (isSelected) {
+      border = Border.all(color: AppColors.textPrimary, width: 1.4);
+    } else if (isToday) {
+      border = Border.all(
+        color: AppColors.accent.withValues(alpha: 0.9),
+        width: 1,
+      );
+    } else if (level == 0) {
+      border = Border.all(
+        color: Colors.white.withValues(alpha: 0.045),
+        width: 0.5,
+      );
+    }
+
+    final square = Padding(
+      padding: const EdgeInsets.all(_cellGap / 2),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: fillColor,
+          borderRadius: BorderRadius.circular(2.5),
+          border: border,
+        ),
+        child: const SizedBox.square(dimension: _cellSize),
+      ),
+    );
+
+    if (isFuture) {
+      return SizedBox(width: _step, height: _step, child: square);
+    }
+
+    final keyStr = ReadingStats.dateKey(localDate);
+    final seconds = stats.secondsOn(localDate);
+    final pages = stats.pagesOn(localDate);
+    final tip = seconds > 0 || pages > 0
+        ? '$keyStr · ${formatReadingDuration(seconds)} · ${formatGroupedNumber(pages)} 页'
+        : '$keyStr · 暂无阅读';
+
+    return Tooltip(
+      message: tip,
+      waitDuration: const Duration(milliseconds: 250),
+      child: GestureDetector(
+        key: ValueKey('heatmap_day_$keyStr'),
+        onTap: () => onSelectDate(localDate),
+        behavior: HitTestBehavior.opaque,
+        child: SizedBox(width: _step, height: _step, child: square),
+      ),
+    );
+  }
+}
+
+class _HeatmapPeriodChip extends StatelessWidget {
+  const _HeatmapPeriodChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.accent.withValues(alpha: 0.18)
+              : Colors.white.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected
+                ? AppColors.accent.withValues(alpha: 0.45)
+                : Colors.white.withValues(alpha: 0.06),
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            color: selected ? AppColors.accent : AppColors.textSecondary,
+          ),
+        ),
       ),
     );
   }

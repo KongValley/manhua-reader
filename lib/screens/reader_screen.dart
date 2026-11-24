@@ -487,6 +487,15 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _restoreSystemUi() {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarContrastEnforced: false,
+      ),
+    );
   }
 
   @override
@@ -1020,6 +1029,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      constraints: const BoxConstraints(maxWidth: double.infinity),
       builder: (context) => ReadingStatsSheet(repository: _repository),
     );
     if (!mounted) return;
@@ -1478,111 +1488,127 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
               child: SafeArea(
                 bottom: false,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      height: 58,
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 4),
-                          IconButton(
-                            onPressed: () => Navigator.of(context).maybePop(),
-                            icon: const Icon(
-                              Icons.arrow_back_ios_new_rounded,
-                              size: 20,
-                            ),
-                            tooltip: '返回书架',
-                          ),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  _book.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 14.5,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.white,
-                                    shadows: [
-                                      Shadow(
-                                        color: Color(0x99000000),
-                                        blurRadius: 6,
+                child: Center(
+                  heightFactor: 1,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 960),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          height: 58,
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 4),
+                              IconButton(
+                                onPressed: () =>
+                                    Navigator.of(context).maybePop(),
+                                icon: const Icon(
+                                  Icons.arrow_back_ios_new_rounded,
+                                  size: 20,
+                                ),
+                                tooltip: '返回书架',
+                              ),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Text(
+                                      _book.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 14.5,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.white,
+                                        shadows: [
+                                          Shadow(
+                                            color: Color(0x99000000),
+                                            blurRadius: 6,
+                                          ),
+                                        ],
                                       ),
-                                    ],
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _topSubtitleText,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.white.withValues(
+                                          alpha: 0.7,
+                                        ),
+                                        fontFeatures: const [
+                                          FontFeature.tabularFigures(),
+                                        ],
+                                        shadows: const [
+                                          Shadow(
+                                            color: Color(0x99000000),
+                                            blurRadius: 5,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: _toggleBookmark,
+                                tooltip: bookmarked ? '移除书签' : '添加书签',
+                                icon: AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 150),
+                                  transitionBuilder: (child, animation) =>
+                                      ScaleTransition(
+                                        scale: animation,
+                                        child: child,
+                                      ),
+                                  child: Icon(
+                                    bookmarked
+                                        ? Icons.bookmark_rounded
+                                        : Icons.bookmark_border_rounded,
+                                    key: ValueKey(bookmarked),
+                                    size: 22,
+                                    color: bookmarked
+                                        ? AppColors.accent
+                                        : Colors.white,
                                   ),
                                 ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  _topSubtitleText,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.white.withValues(alpha: 0.7),
-                                    fontFeatures: const [
-                                      FontFeature.tabularFigures(),
-                                    ],
-                                    shadows: const [
-                                      Shadow(
-                                        color: Color(0x99000000),
-                                        blurRadius: 5,
-                                      ),
-                                    ],
+                              ),
+                              IconButton(
+                                onPressed: _openNavigation,
+                                icon: const Icon(Icons.toc_rounded, size: 22),
+                                tooltip: '目录、书签与缩略图',
+                              ),
+                              if (_mode == ReadingMode.horizontal)
+                                IconButton(
+                                  onPressed: _toggleDirection,
+                                  icon: Icon(
+                                    Icons.swap_horiz_rounded,
+                                    size: 22,
+                                    color: _rightToLeft
+                                        ? AppColors.accent
+                                        : Colors.white,
                                   ),
+                                  tooltip: _rightToLeft
+                                      ? '从右向左阅读'
+                                      : '从左向右阅读',
                                 ),
-                              ],
-                            ),
-                          ),
-                          IconButton(
-                            onPressed: _toggleBookmark,
-                            tooltip: bookmarked ? '移除书签' : '添加书签',
-                            icon: AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 150),
-                              transitionBuilder: (child, animation) =>
-                                  ScaleTransition(scale: animation, child: child),
-                              child: Icon(
-                                bookmarked
-                                    ? Icons.bookmark_rounded
-                                    : Icons.bookmark_border_rounded,
-                                key: ValueKey(bookmarked),
-                                size: 22,
-                                color: bookmarked ? AppColors.accent : Colors.white,
+                              IconButton(
+                                onPressed: _openReaderSettings,
+                                icon: const Icon(Icons.tune_rounded, size: 22),
+                                tooltip: '阅读设置',
                               ),
-                            ),
+                              const SizedBox(width: 4),
+                            ],
                           ),
-                          IconButton(
-                            onPressed: _openNavigation,
-                            icon: const Icon(Icons.toc_rounded, size: 22),
-                            tooltip: '目录、书签与缩略图',
-                          ),
-                          if (_mode == ReadingMode.horizontal)
-                            IconButton(
-                              onPressed: _toggleDirection,
-                              icon: Icon(
-                                Icons.swap_horiz_rounded,
-                                size: 22,
-                                color: _rightToLeft
-                                    ? AppColors.accent
-                                    : Colors.white,
-                              ),
-                              tooltip: _rightToLeft ? '从右向左阅读' : '从左向右阅读',
-                            ),
-                          IconButton(
-                            onPressed: _openReaderSettings,
-                            icon: const Icon(Icons.tune_rounded, size: 22),
-                            tooltip: '阅读设置',
-                          ),
-                          const SizedBox(width: 4),
-                        ],
-                      ),
+                        ),
+                        _buildReadingTimeBadge(),
+                      ],
                     ),
-                    _buildReadingTimeBadge(),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -1701,9 +1727,13 @@ class _ReaderScreenState extends State<ReaderScreen>
                 top: false,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(8, 28, 8, 4),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
+                  child: Center(
+                    heightFactor: 1,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 820),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                       Row(
                         children: [
                           Expanded(
@@ -1842,6 +1872,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                         ),
                       ),
                     ],
+                  ),
+                    ),
                   ),
                 ),
               ),

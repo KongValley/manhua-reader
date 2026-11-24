@@ -30,20 +30,6 @@ android {
         manifestPlaceholders["appLabel"] = "漫阅"
     }
 
-    flavorDimensions += "device"
-    productFlavors {
-        create("phone") {
-            dimension = "device"
-            applicationIdSuffix = ".phone"
-            manifestPlaceholders["appLabel"] = "漫阅"
-        }
-        create("tablet") {
-            dimension = "device"
-            applicationIdSuffix = ".tablet"
-            manifestPlaceholders["appLabel"] = "漫阅 HD"
-        }
-    }
-
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.

@@ -257,6 +257,53 @@ class ReadingStats {
     return dates;
   }
 
+  /// Calendar years that have recorded reading activity (always includes
+  /// [now]'s year), sorted newest-first.
+  /// 存在阅读记录的自然年份列表（始终包含当前年份），按降序排列。
+  List<int> availableYears([DateTime? now]) {
+    final currentYear = (now ?? DateTime.now()).year;
+    final years = <int>{currentYear};
+    for (final day in activeDatesDescending()) {
+      years.add(day.year);
+    }
+    return years.toList()..sort((a, b) => b.compareTo(a));
+  }
+
+  /// Aggregated reading totals across `[start, end]` (inclusive local dates).
+  /// 统计起止自然日区间 `[start, end]`（含首尾）内的阅读汇总数据。
+  ({int activeDays, int totalSeconds, int totalPages, int goalMetDays})
+  summaryBetween(DateTime start, DateTime end) {
+    final startUtc = _day(start);
+    final endUtc = _day(end);
+    if (endUtc.isBefore(startUtc)) {
+      return (activeDays: 0, totalSeconds: 0, totalPages: 0, goalMetDays: 0);
+    }
+    var activeDays = 0;
+    var totalSeconds = 0;
+    var totalPages = 0;
+    var goalMetDays = 0;
+    for (
+      var cursor = startUtc;
+      !cursor.isAfter(endUtc);
+      cursor = cursor.add(const Duration(days: 1))
+    ) {
+      final seconds = secondsOn(cursor);
+      final pages = pagesOn(cursor);
+      if (seconds > 0 || pages > 0) {
+        activeDays++;
+        totalSeconds += seconds;
+        totalPages += pages;
+        if (isGoalMetOn(cursor)) goalMetDays++;
+      }
+    }
+    return (
+      activeDays: activeDays,
+      totalSeconds: totalSeconds,
+      totalPages: totalPages,
+      goalMetDays: goalMetDays,
+    );
+  }
+
   /// Whether the user read anything on [date], counted by pages or by time.
   /// 当天是否有阅读记录：翻过页或有时长都算。
   bool isActiveOn(DateTime date) => pagesOn(date) > 0 || secondsOn(date) > 0;

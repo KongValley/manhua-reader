@@ -290,4 +290,147 @@ void main() {
       }
     });
   });
+
+  testWidgets('full-year heatmap switches years and links tapped cells to daily book details', (
+    tester,
+  ) async {
+    late Directory temp;
+    late AppPaths paths;
+    late LibraryRepository repository;
+    final now = DateTime.now();
+    final olderDay = now.subtract(const Duration(days: 20));
+    final previousYearDay = DateTime(now.year - 1, now.month, now.day).add(
+      const Duration(days: 5),
+    );
+
+    tester.view.physicalSize = const Size(420, 900);
+    tester.view.devicePixelRatio = 1.0;
+
+    await tester.runAsync(() async {
+      temp = await Directory.systemTemp.createTemp('manhua_heatmap_ui_');
+      paths = await AppPaths.create(temp);
+      final stats = ReadingStats(dailyGoalMinutes: 15);
+      // Populate 16 recent days so olderDay sits past the initial 14-day history collapse limit.
+      for (var i = 0; i < 16; i++) {
+        final day = now.subtract(Duration(days: i));
+        stats.addSeconds(
+          300,
+          DateTime(day.year, day.month, day.day, 20),
+          bookId: 'b1',
+          bookTitle: '今日连载漫画',
+        );
+      }
+      stats.addSeconds(
+        1500,
+        DateTime(olderDay.year, olderDay.month, olderDay.day, 22, 25),
+        bookId: 'b_secret',
+        bookTitle: '深藏的杰作',
+      );
+      stats.addPages(30, olderDay, bookId: 'b_secret');
+      stats.addSeconds(
+        600,
+        DateTime(
+          previousYearDay.year,
+          previousYearDay.month,
+          previousYearDay.day,
+          19,
+        ),
+        bookId: 'b_prev',
+        bookTitle: '去年的书',
+      );
+
+      final file1 = File(p.join(paths.booksDir.path, 'b1.pdf'))..writeAsBytesSync([1]);
+      final file2 = File(p.join(paths.booksDir.path, 'b_secret.pdf'))..writeAsBytesSync([1]);
+      final books = [
+        ComicBook(
+          id: 'b1',
+          title: '今日连载漫画',
+          originalName: 'b1.pdf',
+          filePath: file1.path,
+          format: ComicFormat.pdf,
+          pageCount: 20,
+          fileSize: 1,
+          addedAt: DateTime(2026, 11, 1),
+        ),
+        ComicBook(
+          id: 'b_secret',
+          title: '深藏的杰作',
+          originalName: 'b_secret.pdf',
+          filePath: file2.path,
+          format: ComicFormat.pdf,
+          pageCount: 50,
+          fileSize: 1,
+          addedAt: DateTime(2026, 11, 2),
+        ),
+      ];
+      await paths.libraryFile.writeAsString(
+        jsonEncode({
+          'version': 5,
+          'settings': <String, Object?>{},
+          'library': <String, Object?>{},
+          'stats': stats.toJson(),
+          'books': books.map((book) => book.toJson()).toList(),
+        }),
+      );
+      repository = LibraryRepository(paths);
+      await repository.load();
+    });
+
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(() async {
+        await repository.flush();
+        repository.dispose();
+        if (await temp.exists()) await temp.delete(recursive: true);
+      });
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(ManhuaApp(repository: repository));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.tap(find.textContaining('今日已看'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('年度阅读热力图'), findsOneWidget);
+    expect(find.text('近一年'), findsOneWidget);
+    expect(find.text('${now.year}年'), findsOneWidget);
+    expect(find.text('${now.year - 1}年'), findsOneWidget);
+
+    // Initially olderDay is collapsed behind 查看全部记录, so 深藏的杰作 is not inside the sheet yet.
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.textContaining('深藏的杰作'),
+      ),
+      findsNothing,
+    );
+
+    // Tap the heatmap square for 20 days ago and verify preview + expanded daily breakdown appear.
+    final cellFinder = find.byKey(
+      ValueKey('heatmap_day_${ReadingStats.dateKey(olderDay)}'),
+    );
+    await tester.ensureVisible(cellFinder);
+    await tester.tap(cellFinder);
+    await tester.pumpAndSettle();
+
+    expect(find.text('深藏的杰作 · 25 分钟'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('深藏的杰作'),
+      ),
+      findsWidgets,
+    );
+    expect(find.text('25 分钟 · 30 页'), findsWidgets);
+    expect(find.text('22:00–22:25'), findsOneWidget);
+
+    // Switch heatmap to previous calendar year and verify header summary updates.
+    await tester.ensureVisible(find.text('${now.year - 1}年'));
+    await tester.tap(find.text('${now.year - 1}年'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('${now.year - 1} 年 1 天有阅读'), findsOneWidget);
+  });
 }

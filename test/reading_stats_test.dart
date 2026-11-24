@@ -142,4 +142,32 @@ void main() {
     expect(stats.sessionsOn(old), isEmpty);
     expect(stats.bookSecondsOn('b1', old), 120);
   });
+
+  test('computes availableYears and summaryBetween for full-year heatmaps', () {
+    final stats = ReadingStats(dailyGoalMinutes: 10)
+      ..addSeconds(600, DateTime(2025, 12, 31, 20), bookId: 'b1')
+      ..addPages(8, DateTime(2025, 12, 31, 20), bookId: 'b1')
+      ..addSeconds(300, DateTime(2026, 3, 15, 21), bookId: 'b2')
+      ..addPages(4, DateTime(2026, 3, 15, 21), bookId: 'b2')
+      ..addSeconds(900, DateTime(2026, 11, 24, 9), bookId: 'b1')
+      ..addPages(12, DateTime(2026, 11, 24, 9), bookId: 'b1');
+
+    expect(stats.availableYears(DateTime(2026, 11, 24)), [2026, 2025]);
+
+    final year2026 = stats.summaryBetween(
+      DateTime(2026, 1, 1),
+      DateTime(2026, 12, 31),
+    );
+    expect(year2026.activeDays, 2);
+    expect(year2026.totalSeconds, 1200);
+    expect(year2026.totalPages, 16);
+    expect(year2026.goalMetDays, 1);
+
+    final rollingYear = stats.summaryBetween(
+      DateTime(2025, 11, 25),
+      DateTime(2026, 11, 24),
+    );
+    expect(rollingYear.activeDays, 3);
+    expect(rollingYear.goalMetDays, 2);
+  });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/reader_settings.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 
 typedef ReaderLayoutPreferences = ({
   ReadingMode mode,
@@ -185,17 +186,10 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final height = MediaQuery.sizeOf(context).height * 0.86;
-    return SafeArea(
-      top: false,
-      child: Container(
-        height: height,
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-        ),
-        child: Material(
+    return AdaptiveSheetShell(
+      maxWidth: 580,
+      fixedHeightFraction: 0.86,
+      child: Material(
           type: MaterialType.transparency,
           child: Column(
             children: [
@@ -483,7 +477,6 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
             ],
           ),
         ),
-      ),
     );
   }
 }

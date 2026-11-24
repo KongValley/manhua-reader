@@ -8,6 +8,7 @@ import '../models/comic_book.dart';
 import '../models/toc_entry.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 import '../utils/format.dart';
 import 'bookmark_editor_dialog.dart';
 
@@ -33,17 +34,10 @@ class ReaderNavigationSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final height = MediaQuery.sizeOf(context).height * 0.84;
-    return SafeArea(
-      top: false,
-      child: Container(
-        height: height,
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-        ),
-        child: DefaultTabController(
+    return AdaptiveSheetShell(
+      maxWidth: 640,
+      fixedHeightFraction: 0.84,
+      child: DefaultTabController(
           length: 3,
           child: ListenableBuilder(
             listenable: repository,
@@ -139,7 +133,6 @@ class ReaderNavigationSheet extends StatelessWidget {
               );
             },
           ),
-        ),
       ),
     );
   }

@@ -20,6 +20,7 @@ import '../services/pdf_password_store.dart';
 import '../services/saf_album_service.dart';
 import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 import '../utils/book_navigation.dart';
 import '../utils/format.dart';
 import '../widgets/backup_sheet.dart';
@@ -1884,6 +1885,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      constraints: const BoxConstraints(maxWidth: double.infinity),
       builder: (context) => ReadingStatsSheet(repository: _repository),
     );
   }
@@ -1954,11 +1956,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Text('· 双页模式、加密 PDF 解锁'),
               Text('· 屏幕常亮、亮度滤镜、自动翻页与音量键翻页'),
               Text('· 搜索筛选、批量管理、系列与标签'),
-              Text('· 文件夹导入与重命名、阅读统计、备份'),
+              Text('· 文件夹导入与重命名、阅读统计（年度热力图）、备份'),
               Text('· 自动保存阅读进度、阅读方向与模式'),
               Text('· 导入的文件只保存在本机'),
               SizedBox(height: 16),
-              Text('版本 1.8.0'),
+              Text('版本 1.9.0'),
             ],
           ),
         ),
@@ -2000,9 +2002,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
         if (didPop) return;
         if (_selectionMode) _exitSelection();
       },
-      child: Scaffold(
-        bottomNavigationBar: LibraryDeletionUndo(repository: _repository),
-        body: Stack(
+      child: ListenableBuilder(
+        listenable: _repository,
+        builder: (context, bodyChild) => Scaffold(
+          bottomNavigationBar: _repository.pendingDeletionCount > 0
+              ? LibraryDeletionUndo(repository: _repository)
+              : null,
+          body: bodyChild!,
+        ),
+        child: Stack(
           children: [
             const Positioned.fill(child: _LibraryBackground()),
             SafeArea(
@@ -2044,10 +2052,76 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   final view = _repository.librarySettings.view;
                   final showContinue =
                       lastRead != null && !_hasActiveFilters && !_selectionMode;
+                  final screenWidth = MediaQuery.sizeOf(context).width;
+                  final hPad = screenWidth > 1440
+                      ? (screenWidth - 1440) / 2 + 32
+                      : AdaptiveLayout.horizontalPadding(screenWidth);
+                  final wideHero = screenWidth >= 860;
+                  final twoColList = screenWidth >= 760;
+                  final showDailyStrip =
+                      !_hasActiveFilters &&
+                      !_selectionMode &&
+                      (books.isNotEmpty ||
+                          _repository.stats.totalSeconds > 0 ||
+                          _repository.stats.dailyGoalMinutes > 0);
                   final countLabel = _hasActiveFilters
                       ? '${allVisible.length} / ${books.length}'
                       : '${visible.length}';
-                  final bottomPadding = _selectionMode ? 168.0 : 110.0;
+                  final bottomPadding =
+                      (_selectionMode ? 168.0 : 110.0) +
+                      MediaQuery.paddingOf(context).bottom;
+
+                  Widget buildGridCard(ComicBook book) {
+                    return _BookCard(
+                      book: book,
+                      missing: !_repository.fileExists(book),
+                      selectionMode: _selectionMode,
+                      selected: _selectedIds.contains(book.id),
+                      onTap: () {
+                        if (_selectionMode) {
+                          _toggleSelection(book);
+                        } else {
+                          _openBook(book);
+                        }
+                      },
+                      onLongPress: () {
+                        if (_selectionMode) {
+                          _toggleSelection(book);
+                        } else {
+                          _enterSelection(book);
+                        }
+                      },
+                      onMore: () => _showBookActions(book),
+                      onToggleFavorite: () => _toggleFavorite(book),
+                      onTogglePinned: () => _togglePinned(book),
+                    );
+                  }
+
+                  Widget buildListItem(ComicBook book) {
+                    return _BookListItem(
+                      book: book,
+                      missing: !_repository.fileExists(book),
+                      selectionMode: _selectionMode,
+                      selected: _selectedIds.contains(book.id),
+                      onTap: () {
+                        if (_selectionMode) {
+                          _toggleSelection(book);
+                        } else {
+                          _openBook(book);
+                        }
+                      },
+                      onLongPress: () {
+                        if (_selectionMode) {
+                          _toggleSelection(book);
+                        } else {
+                          _enterSelection(book);
+                        }
+                      },
+                      onMore: () => _showBookActions(book),
+                      onToggleFavorite: () => _toggleFavorite(book),
+                      onTogglePinned: () => _togglePinned(book),
+                    );
+                  }
 
                   return CustomScrollView(
                     physics: const BouncingScrollPhysics(
@@ -2056,7 +2130,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     slivers: [
                       SliverToBoxAdapter(
                         child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 20, 12, 0),
+                          padding: EdgeInsets.fromLTRB(
+                            hPad,
+                            20,
+                            (hPad - 8).clamp(8.0, hPad),
+                            0,
+                          ),
                           child: _Header(
                             onImportFolder: _pickFolderAndImport,
                             onSeries: _showSeries,
@@ -2070,7 +2149,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       if (books.isNotEmpty)
                         SliverToBoxAdapter(
                           child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                            padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 0),
                             child: _LibraryToolbar(
                               controller: _searchController,
                               query: _query,
@@ -2098,35 +2177,72 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             ),
                           ),
                         ),
-                      if (!_hasActiveFilters &&
-                          !_selectionMode &&
-                          (books.isNotEmpty ||
-                              _repository.stats.totalSeconds > 0 ||
-                              _repository.stats.dailyGoalMinutes > 0))
+                      if (wideHero && showDailyStrip && showContinue)
                         SliverToBoxAdapter(
                           child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-                            child: _DailyReadingStrip(
-                              stats: _repository.stats,
-                              onTap: _showStats,
+                            padding: EdgeInsets.fromLTRB(hPad, 14, hPad, 0),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Expanded(
+                                  flex: 3,
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      minHeight: 118,
+                                    ),
+                                    child: _ContinueReadingCard(
+                                      book: lastRead,
+                                      onTap: () => _openBook(
+                                        lastRead,
+                                        continueReading: true,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  flex: 2,
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      minHeight: 118,
+                                    ),
+                                    child: _DailyReadingStrip(
+                                      stats: _repository.stats,
+                                      onTap: _showStats,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                        ),
-                      if (showContinue)
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-                            child: _ContinueReadingCard(
-                              book: lastRead,
-                              onTap: () =>
-                                  _openBook(lastRead, continueReading: true),
+                        )
+                      else ...[
+                        if (showDailyStrip)
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.fromLTRB(hPad, 14, hPad, 0),
+                              child: _DailyReadingStrip(
+                                stats: _repository.stats,
+                                onTap: _showStats,
+                              ),
                             ),
                           ),
-                        ),
+                        if (showContinue)
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.fromLTRB(hPad, 14, hPad, 0),
+                              child: _ContinueReadingCard(
+                                book: lastRead,
+                                onTap: () =>
+                                    _openBook(lastRead, continueReading: true),
+                              ),
+                            ),
+                          ),
+                      ],
                       if (showFolderGroups)
                         SliverToBoxAdapter(
                           child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                            padding: EdgeInsets.fromLTRB(hPad, 20, hPad, 0),
                             child: _FolderSection(
                               folders: folders,
                               booksByFolder: folderBooks,
@@ -2148,9 +2264,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       SliverToBoxAdapter(
                         child: Padding(
                           padding: EdgeInsets.fromLTRB(
-                            20,
+                            hPad,
                             books.isEmpty ? 32 : 26,
-                            20,
+                            hPad,
                             books.isEmpty ? 12 : 14,
                           ),
                           child: Row(
@@ -2208,7 +2324,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       else if (visible.isEmpty && showFolderGroups)
                         SliverToBoxAdapter(
                           child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
+                            padding: EdgeInsets.fromLTRB(hPad, 10, hPad, 30),
                             child: Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 16,
@@ -2246,9 +2362,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       else if (view == LibraryViewMode.grid)
                         SliverPadding(
                           padding: EdgeInsets.fromLTRB(
-                            20,
+                            hPad,
                             0,
-                            20,
+                            hPad,
                             bottomPadding,
                           ),
                           sliver: SliverGrid(
@@ -2259,78 +2375,54 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   crossAxisSpacing: 16,
                                   childAspectRatio: 0.57,
                                 ),
-                            delegate: SliverChildBuilderDelegate((
-                              context,
-                              index,
-                            ) {
-                              final book = visible[index];
-                              return _BookCard(
-                                book: book,
-                                missing: !_repository.fileExists(book),
-                                selectionMode: _selectionMode,
-                                selected: _selectedIds.contains(book.id),
-                                onTap: () {
-                                  if (_selectionMode) {
-                                    _toggleSelection(book);
-                                  } else {
-                                    _openBook(book);
-                                  }
-                                },
-                                onLongPress: () {
-                                  if (_selectionMode) {
-                                    _toggleSelection(book);
-                                  } else {
-                                    _enterSelection(book);
-                                  }
-                                },
-                                onMore: () => _showBookActions(book),
-                                onToggleFavorite: () => _toggleFavorite(book),
-                                onTogglePinned: () => _togglePinned(book),
-                              );
-                            }, childCount: visible.length),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) => buildGridCard(visible[index]),
+                              childCount: visible.length,
+                            ),
                           ),
                         )
                       else
                         SliverPadding(
                           padding: EdgeInsets.fromLTRB(
-                            20,
+                            hPad,
                             0,
-                            20,
+                            hPad,
                             bottomPadding,
                           ),
                           sliver: SliverList(
-                            delegate: SliverChildBuilderDelegate((
-                              context,
-                              index,
-                            ) {
-                              final book = visible[index];
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 10),
-                                child: _BookListItem(
-                                  book: book,
-                                  missing: !_repository.fileExists(book),
-                                  selectionMode: _selectionMode,
-                                  selected: _selectedIds.contains(book.id),
-                                  onTap: () {
-                                    if (_selectionMode) {
-                                      _toggleSelection(book);
-                                    } else {
-                                      _openBook(book);
-                                    }
-                                  },
-                                  onLongPress: () {
-                                    if (_selectionMode) {
-                                      _toggleSelection(book);
-                                    } else {
-                                      _enterSelection(book);
-                                    }
-                                  },
-                                  onMore: () => _showBookActions(book),
-                                  onToggleFavorite: () => _toggleFavorite(book),
-                                  onTogglePinned: () => _togglePinned(book),
-                                ),
-                              );
-                            }, childCount: visible.length),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) {
+                                if (!twoColList) {
+                                  return Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: buildListItem(visible[index]),
+                                  );
+                                }
+                                final leftIndex = index * 2;
+                                final rightIndex = leftIndex + 1;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        child: buildListItem(visible[leftIndex]),
+                                      ),
+                                      const SizedBox(width: 14),
+                                      Expanded(
+                                        child: rightIndex < visible.length
+                                            ? buildListItem(visible[rightIndex])
+                                            : const SizedBox.shrink(),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                              childCount: twoColList
+                                  ? (visible.length + 1) ~/ 2
+                                  : visible.length,
+                            ),
                           ),
                         ),
                     ],
@@ -2422,14 +2514,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  int _columnCount(BuildContext context) {
-    final width = MediaQuery.sizeOf(context).width;
-    if (width >= 1180) return 6;
-    if (width >= 940) return 5;
-    if (width >= 700) return 4;
-    if (width >= 520) return 3;
-    return 2;
-  }
+  int _columnCount(BuildContext context) =>
+      AdaptiveLayout.bookColumns(MediaQuery.sizeOf(context).width);
 }
 
 class _LibraryBackground extends StatelessWidget {
@@ -3434,6 +3520,7 @@ class _DailyReadingStrip extends StatelessWidget {
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Row(
                 children: [
@@ -4238,99 +4325,105 @@ class _SelectionBar extends StatelessWidget {
             ),
           ],
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
+        child: Center(
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                IconButton(
-                  onPressed: onClose,
-                  tooltip: '退出多选',
-                  icon: const IgnorePointer(
-                    child: Icon(Icons.close_rounded, size: 18),
-                  ),
-                  color: AppColors.textSecondary,
-                  style: IconButton.styleFrom(
-                    fixedSize: const Size(40, 40),
-                    minimumSize: const Size(40, 40),
-                    maximumSize: const Size(40, 40),
-                    padding: EdgeInsets.zero,
-                  ),
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: onClose,
+                      tooltip: '退出多选',
+                      icon: const IgnorePointer(
+                        child: Icon(Icons.close_rounded, size: 18),
+                      ),
+                      color: AppColors.textSecondary,
+                      style: IconButton.styleFrom(
+                        fixedSize: const Size(40, 40),
+                        minimumSize: const Size(40, 40),
+                        maximumSize: const Size(40, 40),
+                        padding: EdgeInsets.zero,
+                      ),
+                    ),
+                    Text(
+                      '已选 $selectedCount 本',
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const Spacer(),
+                    TextButton.icon(
+                      onPressed: hasSelection ? onMore : null,
+                      icon: const Icon(Icons.more_horiz_rounded, size: 18),
+                      label: const Text('批量操作'),
+                    ),
+                    TextButton(
+                      onPressed: onSelectAll,
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        minimumSize: const Size(0, 36),
+                        visualDensity: VisualDensity.compact,
+                        textStyle: const TextStyle(fontSize: 12.5),
+                      ),
+                      child: Text(allSelected ? '取消全选' : '全选'),
+                    ),
+                  ],
                 ),
-                Text(
-                  '已选 $selectedCount 本',
-                  style: const TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: hasSelection ? onMore : null,
-                  icon: const Icon(Icons.more_horiz_rounded, size: 18),
-                  label: const Text('批量操作'),
-                ),
-                TextButton(
-                  onPressed: onSelectAll,
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    minimumSize: const Size(0, 36),
-                    visualDensity: VisualDensity.compact,
-                    textStyle: const TextStyle(fontSize: 12.5),
-                  ),
-                  child: Text(allSelected ? '取消全选' : '全选'),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _BatchActionButton(
+                        icon: allFavorite
+                            ? Icons.star_rounded
+                            : Icons.star_border_rounded,
+                        label: '收藏',
+                        tooltip: allFavorite ? '取消收藏选中的漫画' : '收藏选中的漫画',
+                        active: allFavorite,
+                        onPressed: hasSelection ? onFavorite : null,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _BatchActionButton(
+                        icon: allPinned
+                            ? Icons.push_pin_rounded
+                            : Icons.push_pin_outlined,
+                        label: '置顶',
+                        tooltip: allPinned ? '取消置顶选中的漫画' : '置顶选中的漫画',
+                        active: allPinned,
+                        onPressed: hasSelection ? onPin : null,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _BatchActionButton(
+                        icon: Icons.done_all_rounded,
+                        label: '已读',
+                        tooltip: '标记已读',
+                        highlight: true,
+                        onPressed: hasSelection ? onMarkRead : null,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _BatchActionButton(
+                        icon: Icons.delete_outline_rounded,
+                        label: '删除',
+                        tooltip: '删除选中的漫画',
+                        danger: true,
+                        onPressed: hasSelection ? onDelete : null,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Expanded(
-                  child: _BatchActionButton(
-                    icon: allFavorite
-                        ? Icons.star_rounded
-                        : Icons.star_border_rounded,
-                    label: '收藏',
-                    tooltip: allFavorite ? '取消收藏选中的漫画' : '收藏选中的漫画',
-                    active: allFavorite,
-                    onPressed: hasSelection ? onFavorite : null,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _BatchActionButton(
-                    icon: allPinned
-                        ? Icons.push_pin_rounded
-                        : Icons.push_pin_outlined,
-                    label: '置顶',
-                    tooltip: allPinned ? '取消置顶选中的漫画' : '置顶选中的漫画',
-                    active: allPinned,
-                    onPressed: hasSelection ? onPin : null,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _BatchActionButton(
-                    icon: Icons.done_all_rounded,
-                    label: '已读',
-                    tooltip: '标记已读',
-                    highlight: true,
-                    onPressed: hasSelection ? onMarkRead : null,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _BatchActionButton(
-                    icon: Icons.delete_outline_rounded,
-                    label: '删除',
-                    tooltip: '删除选中的漫画',
-                    danger: true,
-                    onPressed: hasSelection ? onDelete : null,
-                  ),
-                ),
-              ],
-            ),
-          ],
+          ),
         ),
       ),
     );

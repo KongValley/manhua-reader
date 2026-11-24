@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/comic_book.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 import '../utils/book_navigation.dart';
 import '../widgets/book_cover.dart';
 import '../widgets/library_deletion_undo.dart';
@@ -31,11 +32,14 @@ class SeriesScreen extends StatelessWidget {
           if (groups.isEmpty) {
             return const _EmptySeries();
           }
+          final width = MediaQuery.sizeOf(context).width;
+          final hPad = AdaptiveLayout.horizontalPadding(width);
+          final bottomSafe = MediaQuery.paddingOf(context).bottom;
           return GridView.builder(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
+            padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 30 + bottomSafe),
             physics: const BouncingScrollPhysics(),
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: _columns(context),
+              crossAxisCount: AdaptiveLayout.seriesColumns(width),
               mainAxisSpacing: 18,
               crossAxisSpacing: 14,
               childAspectRatio: 0.76,
@@ -61,14 +65,6 @@ class SeriesScreen extends StatelessWidget {
         },
       ),
     );
-  }
-
-  int _columns(BuildContext context) {
-    final width = MediaQuery.sizeOf(context).width;
-    if (width >= 1100) return 5;
-    if (width >= 850) return 4;
-    if (width >= 600) return 3;
-    return 2;
   }
 }
 
@@ -284,54 +280,50 @@ class SeriesDetailScreen extends StatelessWidget {
       ),
       body: current.isEmpty
           ? const Center(child: Text('系列中没有书籍'))
-          : GridView.builder(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
-            physics: const BouncingScrollPhysics(),
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: _columns(context),
-              mainAxisSpacing: 18,
-              crossAxisSpacing: 14,
-              childAspectRatio: 0.58,
-            ),
-            itemCount: current.length,
-            itemBuilder: (context, index) {
-              final book = current[index];
-              final actions = onBookActions;
-              final missing = !repository.fileExists(book);
-              return FolderBookCard(
-                book: book,
-                missing: missing,
-                onMore: actions == null ? null : () => actions(book),
-                onTap: () {
-                  if (missing) {
-                    if (actions != null) {
-                      actions(book);
-                      return;
-                    }
-                    ScaffoldMessenger.of(context)
-                      ..hideCurrentSnackBar()
-                      ..showSnackBar(
-                        const SnackBar(content: Text('文件丢失，请回书架重新定位')),
-                      );
-                    return;
-                  }
-                  openComicBook(context, book: book, repository: repository);
+          : () {
+              final width = MediaQuery.sizeOf(context).width;
+              final hPad = AdaptiveLayout.horizontalPadding(width);
+              final bottomSafe = MediaQuery.paddingOf(context).bottom;
+              return GridView.builder(
+                padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 30 + bottomSafe),
+                physics: const BouncingScrollPhysics(),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: AdaptiveLayout.bookColumns(width),
+                  mainAxisSpacing: 18,
+                  crossAxisSpacing: 14,
+                  childAspectRatio: 0.58,
+                ),
+                itemCount: current.length,
+                itemBuilder: (context, index) {
+                  final book = current[index];
+                  final actions = onBookActions;
+                  final missing = !repository.fileExists(book);
+                  return FolderBookCard(
+                    book: book,
+                    missing: missing,
+                    onMore: actions == null ? null : () => actions(book),
+                    onTap: () {
+                      if (missing) {
+                        if (actions != null) {
+                          actions(book);
+                          return;
+                        }
+                        ScaffoldMessenger.of(context)
+                          ..hideCurrentSnackBar()
+                          ..showSnackBar(
+                            const SnackBar(content: Text('文件丢失，请回书架重新定位')),
+                          );
+                        return;
+                      }
+                      openComicBook(context, book: book, repository: repository);
+                    },
+                  );
                 },
               );
-            },
-          ),
+            }(),
         );
       },
     );
-  }
-
-  int _columns(BuildContext context) {
-    final width = MediaQuery.sizeOf(context).width;
-    if (width >= 1180) return 6;
-    if (width >= 940) return 5;
-    if (width >= 700) return 4;
-    if (width >= 520) return 3;
-    return 2;
   }
 }
 

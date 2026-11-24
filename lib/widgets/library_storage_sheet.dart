@@ -5,6 +5,7 @@ import '../models/library_storage_report.dart';
 import '../services/external_open_channel.dart';
 import '../services/library_repository.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 import '../utils/format.dart';
 
 /// Bottom sheet that summarises disk usage and reclaims cache/orphan files.
@@ -145,18 +146,10 @@ class _LibraryStorageSheetState extends State<LibraryStorageSheet> {
   Widget build(BuildContext context) {
     final books = [...widget.repository.books]
       ..sort((a, b) => b.fileSize.compareTo(a.fileSize));
-    return SafeArea(
-      top: false,
-      child: Container(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.86,
-        ),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-        ),
-        child: SingleChildScrollView(
+    return AdaptiveSheetShell(
+      maxWidth: 600,
+      maxHeightFraction: 0.86,
+      child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 10, 20, 22),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -433,7 +426,6 @@ class _LibraryStorageSheetState extends State<LibraryStorageSheet> {
             ],
           ),
         ),
-      ),
     );
   }
 }

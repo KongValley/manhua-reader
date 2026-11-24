@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../services/library_repository.dart';
 import '../services/saf_folder_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/adaptive_layout.dart';
 import '../utils/format.dart';
 
 class BackupSheet extends StatefulWidget {
@@ -328,17 +329,9 @@ class _BackupSheetState extends State<BackupSheet> {
     );
     return PopScope(
       canPop: !_busy,
-      child: SafeArea(
-        top: false,
-      child: Container(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.86,
-        ),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-        ),
+      child: AdaptiveSheetShell(
+        maxWidth: 600,
+        maxHeightFraction: 0.86,
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 10, 20, 22),
           child: Column(
@@ -483,7 +476,6 @@ class _BackupSheetState extends State<BackupSheet> {
             ],
           ),
         ),
-      ),
       ),
     );
   }

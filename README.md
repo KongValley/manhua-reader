@@ -28,7 +28,7 @@
   - Android 通过 Storage Access Framework 选择文件夹，递归列出并通过原生通道复制导入。
   - 按文件夹导入时保留所选目录为一个书架文件夹；文件夹卡片显示名称、书籍数与平均进度。
   - 已导入的漫画可移动到已有或新建的书架文件夹，也可移回根目录。删除书架文件夹时，其书籍移回根目录并保留进度和书签。
-- **阅读统计（P2）**：按本地日期记录每日翻页页数、有效阅读时长与分书阅读历史，支持每日阅读目标；展示今日、本周、累计、连续阅读天数和最近 7 天柱状图，书架与阅读器顶栏同步显示今日阅读时长进度。
+- **阅读统计（P2）**：按本地日期记录每日翻页页数、有效阅读时长与分书阅读历史，支持每日阅读目标；展示今日、本周、累计、连续阅读天数、最近 7 天柱状图，以及支持「近一年」与按年份切换的**年度阅读热力图**（点击格子可联动预览当天阅读书目并定位到每日时间明细）；书架与阅读器顶栏同步显示今日阅读时长进度。
 - **备份与恢复（P2）**
   - 导出 JSON：书架、文件夹、进度、书签、系列、标签、收藏、置顶与统计；不含漫画文件。
   - 导出完整 `.mrbackup`（ZIP）：以流式写入包含漫画文件与封面；Android / 桌面端通过系统文件流保存，支持大体积书架导出与流式文件恢复。
@@ -58,7 +58,7 @@
   - MOBI：解析 PalmDB / MOBI 头、EXTH 封面与 HTML `<img recindex>` 阅读顺序，按需读取内嵌图片；复用单个文件句柄并用小容量 LRU 缓存最近页面，100 MB 的卷不会整体读入内存，也不会因物理记录乱序而错页。
   - CBZ：使用 ZIP 容器，按中央目录随机读取，图片按文件名自然排序，不整包读入内存；打开时只抽样首页尺寸，其余页面在进入阅读窗口时渐进解析；支持嵌套目录和章节目录。
   - 图片相册：引用原文件夹，可按名称 / 创建时间 / 修改时间升序或降序排列；子文件夹作为章节；文件夹增删图片后下次打开自动生效。
-- **手机 / 平板适配**：书架列数随宽度变化，阅读器适配横竖屏与桌面窗口。
+- **手机 / 平板 / 桌面自适应**：Android 手机与平板已合并为单一安装包，按屏幕宽度自动切换 2–6 列书架、横排英雄卡片、双列列表、居中自适应底部弹窗与阅读器工具栏；同时支持桌面窗口自由缩放。
 - **隐私**：全部本地处理，运行时不联网；导入文件只保存在本机；PDF 密码不会写入书架或导出的备份。选择记住密码后，凭据由设备的安全存储保护。
 
 > 本仓库不包含用户提供的测试漫画 `test/VOL.001.pdf` / `.mobi`（体积大且含版权内容），也不提交本地截图。将样本放回 `test/` 后即可运行对应测试；界面截图可用 `tool/capture_screens.ps1` 在本地生成。
@@ -87,17 +87,14 @@ flutter run -d android
 flutter run -d ios
 ```
 
-### 三端打包
+### 打包构建
 
 ```bash
 # PC 桌面端（Windows x64）
 flutter build windows --release --no-pub
 
-# 安卓手机端
-flutter build apk --release --flavor phone --no-pub
-
-# 安卓平板端
-flutter build apk --release --flavor tablet --no-pub
+# Android 通用自适应包（支持手机、折叠屏与平板）
+flutter build apk --release --no-pub
 ```
 
 产物：
@@ -105,12 +102,11 @@ flutter build apk --release --flavor tablet --no-pub
 | 端 | 产物 | 包名 / 说明 |
 | --- | --- | --- |
 | PC Windows | `build/windows/x64/runner/Release/` | Windows 10/11 x64 便携版 |
-| Android 手机 | `build/app/outputs/flutter-apk/app-phone-release.apk` | `com.manhua.manhua_reader.phone`，桌面名「漫阅」 |
-| Android 平板 | `build/app/outputs/flutter-apk/app-tablet-release.apk` | `com.manhua.manhua_reader.tablet`，桌面名「漫阅 HD」 |
+| Android（手机 / 平板自适应） | `build/app/outputs/flutter-apk/app-release.apk` | `com.manhua.manhua_reader`，桌面名「漫阅」 |
 
-- 手机 / 平板使用同一套响应式界面：手机 2 列，平板按宽度 4–6 列；两个 APK 可同时安装。
+- 手机、折叠屏与平板统一使用同一 APK，按屏幕宽度自适应：手机 2 列，平板 / 桌面按宽度 3–6 列，英雄卡片与列表双列自动切换，底部弹窗宽屏居中约束。
 - 桌面版为便携 ZIP。需要在资源管理器「打开方式」中出现漫阅时，在「设置 → 存储管理」中打开「注册 Windows『打开方式』」；它只把漫阅加入 PDF / MOBI / CBZ 的候选程序，不改动系统默认应用。
-- 两个 Android 版本都注册了 PDF / MOBI / CBZ 的 `ACTION_VIEW`，可从文件管理器直接交给漫阅打开，重复文件会复用书架中内容一致的副本。
+- Android 版本注册了 PDF / MOBI / CBZ 的 `ACTION_VIEW`，可从文件管理器直接交给漫阅打开，重复文件会复用书架中内容一致的副本。
 - 当前 Android Release 使用调试签名，适合侧载测试；上架应用商店前需配置正式签名。
 
 > Windows 构建说明：正常情况下开启系统「开发者模式」即可。若无法开启，可手动为 `.flutter-plugins-dependencies` 里的 Windows 插件在 `windows/flutter/ephemeral/.plugin_symlinks/` 下创建目录 junction，然后使用 `flutter build windows --no-pub`（本项目开发环境即采用这种方式）。
@@ -187,9 +183,10 @@ lib/
 │  ├─ pdf_password_flow.dart  # 会话、设备存储与输入框的尝试顺序
 │  └─ pdf_password_store.dart # 可选设备密码存储（DPAPI / Keystore）
 ├─ utils/
-│  ├─ pagination.dart         # 双页跨页配对
-│  ├─ reading_clock.dart      # 有效阅读时长
-│  └─ series.dart             # 从标题 / 文件名推导系列名
+│  ├─ adaptive_layout.dart       # 手机 / 折叠屏 / 平板 / 桌面自适应断点与弹窗容器
+│  ├─ pagination.dart            # 双页跨页配对
+│  ├─ reading_clock.dart         # 有效阅读时长
+│  └─ series.dart                # 从标题 / 文件名推导系列名
 └─ widgets/
    ├─ book_cover.dart
    ├─ bookmark_editor_dialog.dart   # 书签名称 / 备注编辑
@@ -228,6 +225,7 @@ test/
 ├─ library_folder_screen_test.dart # 文件夹分组、重命名/删除、跨文件夹搜索
 ├─ library_screen_test.dart
 ├─ daily_reading_time_test.dart # 每日阅读时长记录、阅读目标、分书日志与 UI 展示
+├─ adaptive_layout_test.dart  # 手机 / 平板自适应断点、弹窗约束与响应布局测试
 ├─ bugfix_regression_test.dart # 模型容错、串行存储、安全备份恢复与多选生命周期回归
 ├─ encrypted_sample.pdf       # 加密测试样本（密码 manhua123）
 └─ VOL.001.pdf / .mobi        # 本地可选漫画样本（不随仓库提交）
@@ -244,8 +242,9 @@ flutter analyze
 flutter test
 ```
 
-公开仓库不含 `test/VOL.001.*`。缺失样本时，相应测试会自动跳过。本机样本齐全时共 184 项测试。
+公开仓库不含 `test/VOL.001.*`。缺失样本时，相应测试会自动跳过。本机样本齐全时共 190 项测试。
 
+- 年度阅读热力图与自适应布局：全年 / 跨年贡献网格与区间统计、热力格子联动当日书目明细、手机 / 平板断点、宽屏双列列表、英雄卡片横排及居中弹窗约束。
 - 每日阅读时间记录与目标：今日时长进度条、每日目标达成、分书阅读时间日志及统计面板交互。
 - 稳定性与安全回归：MOBI LZ77 解压与 `extraDataFlags`、WebP/BMP/EXIF 尺寸解析、有界 ZIP 解压与 ZIP64 越界保护、损坏条目录容错、串行存储操作、流式备份与路径穿越拦截、多选同步与弹窗生命周期。
 
